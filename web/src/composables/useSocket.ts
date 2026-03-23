@@ -30,23 +30,23 @@ export function useSocket() {
     })
 
     // BUG-03: Listen to probe_snapshot for real-time dashboard updates
-    s.on('dashboard:probe_snapshot', (data: any) => {
+    s.on('dashboard_probe_snapshot', (data: any) => {
       const store = useDashboardStore()
       if (data.tasks) {
         store.updateTaskSnapshot(data.tasks)
       }
     })
 
-    s.on('dashboard:task_detail', (data: any) => {
+    s.on('dashboard_task_detail', (data: any) => {
       // Only used by TaskDetailView subscribers, not dashboard
     })
 
-    s.on('dashboard:node_status', (data: any) => {
+    s.on('dashboard_node_status', (data: any) => {
       const store = useDashboardStore()
       store.updateNodeStatus(data.node_id, data.status)
     })
 
-    s.on('dashboard:alert', (data: any) => {
+    s.on('dashboard_alert', (data: any) => {
       const store = useDashboardStore()
       // BUG-06: Use 'alerting' not 'triggered'
       store.updateTask(data.task_id, {
@@ -61,11 +61,11 @@ export function useSocket() {
   }
 
   function subscribeTask(taskId: string) {
-    socket.value?.emit('dashboard:subscribe_task', { task_id: taskId })
+    socket.value?.emit('dashboard_subscribe_task', { task_id: taskId })
   }
 
   function unsubscribeTask(taskId: string) {
-    socket.value?.emit('dashboard:unsubscribe_task', { task_id: taskId })
+    socket.value?.emit('dashboard_unsubscribe_task', { task_id: taskId })
   }
 
   return { socket, connect, disconnect, subscribeTask, unsubscribeTask }

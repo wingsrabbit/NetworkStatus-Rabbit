@@ -46,7 +46,7 @@ class WSClient:
             self.authenticated = False
             self._stop_heartbeat()
 
-        @sio.on('center:auth_result', namespace='/agent')
+        @sio.on('center_auth_result', namespace='/agent')
         def on_auth_result(data):
             if data.get('success'):
                 logger.info("Authentication successful")
@@ -57,24 +57,24 @@ class WSClient:
                 logger.error(f"Authentication failed: {data.get('message')}")
                 self.authenticated = False
 
-        @sio.on('center:task_sync', namespace='/agent')
+        @sio.on('center_task_sync', namespace='/agent')
         def on_task_sync(data):
             cv = data.get('config_version', 0)
             tasks = data.get('tasks', [])
             logger.info(f"Received full task sync: config_version={cv}, {len(tasks)} tasks")
             self.scheduler.update_tasks(tasks)
             self.config_version = cv
-            sio.emit('agent:task_ack', {'config_version': cv}, namespace='/agent')
+            sio.emit('agent_task_ack', {'config_version': cv}, namespace='/agent')
 
-        @sio.on('center:task_assign', namespace='/agent')
+        @sio.on('center_task_assign', namespace='/agent')
         def on_task_assign(data):
             cv = data.get('config_version', 0)
             logger.info(f"Received task assign: {data.get('task_id')}")
             self.scheduler.start_task(data)
             self.config_version = cv
-            sio.emit('agent:task_ack', {'config_version': cv}, namespace='/agent')
+            sio.emit('agent_task_ack', {'config_version': cv}, namespace='/agent')
 
-        @sio.on('center:task_update', namespace='/agent')
+        @sio.on('center_task_update', namespace='/agent')
         def on_task_update(data):
             cv = data.get('config_version', 0)
             task_id = data.get('task_id')
@@ -83,23 +83,23 @@ class WSClient:
             if data.get('enabled', True):
                 self.scheduler.start_task(data)
             self.config_version = cv
-            sio.emit('agent:task_ack', {'config_version': cv}, namespace='/agent')
+            sio.emit('agent_task_ack', {'config_version': cv}, namespace='/agent')
 
-        @sio.on('center:task_remove', namespace='/agent')
+        @sio.on('center_task_remove', namespace='/agent')
         def on_task_remove(data):
             cv = data.get('config_version', 0)
             task_id = data.get('task_id')
             logger.info(f"Received task remove: {task_id}")
             self.scheduler.stop_task(task_id)
             self.config_version = cv
-            sio.emit('agent:task_ack', {'config_version': cv}, namespace='/agent')
+            sio.emit('agent_task_ack', {'config_version': cv}, namespace='/agent')
 
-        @sio.on('center:result_ack', namespace='/agent')
+        @sio.on('center_result_ack', namespace='/agent')
         def on_result_ack(data):
             result_id = data.get('result_id')
             self.cache.mark_acked(result_id)
 
-        @sio.on('center:batch_ack', namespace='/agent')
+        @sio.on('center_batch_ack', namespace='/agent')
         def on_batch_ack(data):
             accepted_ids = data.get('accepted_ids', [])
             self.cache.mark_batch_acked(accepted_ids)
@@ -152,7 +152,7 @@ class WSClient:
             'private_ip': private_ip,
         }
 
-        self.sio.emit('agent:auth', {
+        self.sio.emit('agent_auth', {
             'node_id': self.config.node_id,
             'token': self.config.token,
             'config_version': self.config_version,
@@ -168,7 +168,7 @@ class WSClient:
                 if self.connected and self.authenticated:
                     self._seq += 1
                     try:
-                        self.sio.emit('agent:heartbeat', {
+                        self.sio.emit('agent_heartbeat', {
                             'node_id': self.config.node_id,
                             'seq': self._seq,
                         }, namespace='/agent')
@@ -195,7 +195,7 @@ class WSClient:
         for i in range(0, len(unacked), 100):
             chunk = unacked[i:i + 100]
             chunk_batch_id = f'{batch_id}-{i}'
-            self.sio.emit('agent:probe_batch', {
+            self.sio.emit('agent_probe_batch', {
                 'batch_id': chunk_batch_id,
                 'results': chunk,
             }, namespace='/agent')
@@ -219,7 +219,7 @@ class WSClient:
 
         if self.connected and self.authenticated:
             try:
-                self.sio.emit('agent:probe_result', payload, namespace='/agent')
+                self.sio.emit('agent_probe_result', payload, namespace='/agent')
                 self.cache.mark_sent(result_id)
             except Exception as e:
                 logger.warning(f"Failed to send result {result_id}: {e}")

@@ -114,7 +114,7 @@ def create_task():
     db.session.commit()
 
     # Notify agent via WebSocket
-    _notify_agent_task_change(source_node_id, 'center:task_assign', task, new_version)
+    _notify_agent_task_change(source_node_id, 'center_task_assign', task, new_version)
 
     return jsonify({'task': task.to_dict()}), 201
 
@@ -151,7 +151,7 @@ def update_task(task_id):
     new_version = task_service.increment_config_version(task.source_node_id)
     db.session.commit()
 
-    _notify_agent_task_change(task.source_node_id, 'center:task_update', task, new_version)
+    _notify_agent_task_change(task.source_node_id, 'center_task_update', task, new_version)
 
     return jsonify({'task': task.to_dict()}), 200
 
@@ -175,7 +175,7 @@ def delete_task(task_id):
     from server.extensions import socketio
     sid = get_connection_sid(source_node_id)
     if sid:
-        socketio.emit('center:task_remove', {
+        socketio.emit('center_task_remove', {
             'task_id': task_id_copy,
             'config_version': new_version
         }, to=sid, namespace='/agent')
@@ -198,7 +198,7 @@ def toggle_task(task_id):
     new_version = task_service.increment_config_version(task.source_node_id)
     db.session.commit()
 
-    _notify_agent_task_change(task.source_node_id, 'center:task_update', task, new_version)
+    _notify_agent_task_change(task.source_node_id, 'center_task_update', task, new_version)
 
     return jsonify({
         'task': {
@@ -217,6 +217,6 @@ def _notify_agent_task_change(node_id, event, task, config_version):
     if sid:
         payload = task.to_agent_dict()
         payload['config_version'] = config_version
-        if event == 'center:task_update':
+        if event == 'center_task_update':
             payload['changes'] = payload  # Include all current values
         socketio.emit(event, payload, to=sid, namespace='/agent')

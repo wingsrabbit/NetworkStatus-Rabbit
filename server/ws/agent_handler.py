@@ -73,24 +73,24 @@ class AgentNamespace(Namespace):
         capabilities = data.get('capabilities', {})
 
         if not node_id or not token:
-            emit('center:auth_result', {'success': False, 'message': 'Missing node_id or token'})
+            emit('center_auth_result', {'success': False, 'message': 'Missing node_id or token'})
             disconnect()
             return
 
         node = db.session.get(Node, node_id)
         if not node:
-            emit('center:auth_result', {'success': False, 'message': 'Node not found'})
+            emit('center_auth_result', {'success': False, 'message': 'Node not found'})
             disconnect()
             return
 
         if not node.enabled:
-            emit('center:auth_result', {'success': False, 'message': 'Node is disabled'})
+            emit('center_auth_result', {'success': False, 'message': 'Node is disabled'})
             disconnect()
             return
 
         # Verify token
         if not bcrypt.checkpw(token.encode('utf-8'), node.token.encode('utf-8')):
-            emit('center:auth_result', {'success': False, 'message': 'Invalid token'})
+            emit('center_auth_result', {'success': False, 'message': 'Invalid token'})
             disconnect()
             return
 
@@ -108,7 +108,7 @@ class AgentNamespace(Namespace):
         node.capabilities = json.dumps(capabilities) if capabilities else None
         db.session.commit()
 
-        emit('center:auth_result', {'success': True, 'message': 'Authenticated'})
+        emit('center_auth_result', {'success': True, 'message': 'Authenticated'})
         logger.info(f"Agent authenticated: node_id={node_id}, capabilities={capabilities.get('protocols', [])}")
 
         # Config version sync
@@ -119,7 +119,7 @@ class AgentNamespace(Namespace):
                                f"than server ({server_version}). Forcing full sync.")
             # Send full task sync
             tasks = task_service.get_tasks_for_node(node_id)
-            emit('center:task_sync', {
+            emit('center_task_sync', {
                 'config_version': server_version,
                 'tasks': [t.to_agent_dict() for t in tasks]
             })
@@ -151,19 +151,19 @@ class AgentNamespace(Namespace):
         task = db.session.get(ProbeTask, task_id)
         if not task:
             logger.warning(f"Probe result for unknown task: {task_id}")
-            emit('center:result_ack', {'result_id': result_id})
+            emit('center_result_ack', {'result_id': result_id})
             return
 
         # BUG-B03: Verify task belongs to this node
         if task.source_node_id != node_id:
             logger.warning(f"Node {node_id} submitted result for task {task_id} owned by {task.source_node_id}")
-            emit('center:result_ack', {'result_id': result_id})
+            emit('center_result_ack', {'result_id': result_id})
             return
 
         # BUG-01: Dedup check before writing
         if influx_service.check_result_exists(result_id, task_id):
             logger.debug(f"Duplicate result_id={result_id}, skipping write but ACKing")
-            emit('center:result_ack', {'result_id': result_id})
+            emit('center_result_ack', {'result_id': result_id})
             return
 
         source_node = db.session.get(Node, task.source_node_id)
@@ -188,7 +188,7 @@ class AgentNamespace(Namespace):
             logger.error(f"Failed to write probe result: {e}")
 
         # ACK
-        emit('center:result_ack', {'result_id': result_id})
+        emit('center_result_ack', {'result_id': result_id})
 
         # Update latest result cache for dashboard
         _update_latest_result(task_id, data.get('metrics', {}), data.get('timestamp'))
@@ -259,7 +259,7 @@ class AgentNamespace(Namespace):
             except Exception as e:
                 logger.error(f"Failed to write batch result {result_id}: {e}")
 
-        emit('center:batch_ack', {
+        emit('center_batch_ack', {
             'batch_id': batch_id,
             'accepted_ids': accepted_ids
         })

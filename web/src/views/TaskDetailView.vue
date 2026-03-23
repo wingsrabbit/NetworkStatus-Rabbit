@@ -126,12 +126,12 @@ onMounted(() => {
   }
   fetchData()
   subscribeTask(taskId)
-  socket.value?.on('dashboard:task_detail', handleRealtimeUpdate)
+  socket.value?.on('dashboard_task_detail', handleRealtimeUpdate)
 })
 
 onUnmounted(() => {
   unsubscribeTask(taskId)
-  socket.value?.off('dashboard:task_detail', handleRealtimeUpdate)
+  socket.value?.off('dashboard_task_detail', handleRealtimeUpdate)
   chart.value?.dispose()
 })
 

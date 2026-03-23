@@ -164,7 +164,7 @@ def _start_background_tasks(app):
                         'timestamp': datetime.now(timezone.utc).isoformat() + 'Z',
                         'tasks': task_data,
                     }
-                    socketio.emit('dashboard:probe_snapshot', snapshot, namespace='/dashboard')
+                    socketio.emit('dashboard_probe_snapshot', snapshot, namespace='/dashboard')
                 except Exception as e:
                     logging.error(f"Snapshot pusher error: {e}")
 
@@ -181,7 +181,7 @@ def _start_background_tasks(app):
                         sid = node_service.get_connection_sid(node_id)
                         if sid:
                             tasks = task_service.get_tasks_for_node(node_id)
-                            socketio.emit('center:task_sync', {
+                            socketio.emit('center_task_sync', {
                                 'config_version': config_version,
                                 'tasks': [t.to_agent_dict() for t in tasks]
                             }, to=sid, namespace='/agent')

@@ -84,7 +84,7 @@ class DashboardNamespace(Namespace):
 def push_task_detail(task_id, result_data):
     """Push real-time probe data to subscribers of a specific task."""
     room = f'task:{task_id}'
-    socketio.emit('dashboard:task_detail', {
+    socketio.emit('dashboard_task_detail', {
         'task_id': task_id,
         'result': result_data,
     }, room=room, namespace='/dashboard')
@@ -92,7 +92,7 @@ def push_task_detail(task_id, result_data):
 
 def push_node_status(node_id, node_name, status):
     """Push node status change to all dashboard clients."""
-    socketio.emit('dashboard:node_status', {
+    socketio.emit('dashboard_node_status', {
         'node_id': node_id,
         'name': node_name,
         'status': status,
@@ -101,7 +101,7 @@ def push_node_status(node_id, node_name, status):
 
 def push_alert(alert_data):
     """Push alert notification to all dashboard clients."""
-    socketio.emit('dashboard:alert', alert_data, namespace='/dashboard')
+    socketio.emit('dashboard_alert', alert_data, namespace='/dashboard')
 
 
 def register_dashboard_handlers(socketio_instance):
