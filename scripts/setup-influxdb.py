@@ -66,8 +66,6 @@ def setup_influxdb():
 
     # 1-minute aggregation task: raw -> agg_1m
     task_1m_flux = '''
-option task = {name: "downsample_1m", every: 1m}
-
 from(bucket: "raw")
   |> range(start: -2m)
   |> filter(fn: (r) => r._measurement == "probe_result")
@@ -79,8 +77,6 @@ from(bucket: "raw")
 
     # 1-hour aggregation task: agg_1m -> agg_1h
     task_1h_flux = '''
-option task = {name: "downsample_1h", every: 1h}
-
 from(bucket: "agg_1m")
   |> range(start: -2h)
   |> filter(fn: (r) => r._measurement == "probe_result")
@@ -90,24 +86,32 @@ from(bucket: "agg_1m")
   |> to(bucket: "agg_1h", org: "%s")
 ''' % org
 
-    # Check existing tasks before creating
-    existing_tasks = tasks_api.find_tasks()
-    existing_names = {t.name for t in existing_tasks}
+    # Resolve org object for task creation
+    orgs_api = client.organizations_api()
+    org_list = orgs_api.find_organizations(org=org)
+    if not org_list:
+        print(f"WARNING: Organization '{org}' not found, skipping task creation")
+    else:
+        org_obj = org_list[0]
 
-    for task_name, flux in [('downsample_1m', task_1m_flux), ('downsample_1h', task_1h_flux)]:
-        if task_name in existing_names:
-            print(f"Task '{task_name}' already exists, skipping")
-            continue
-        try:
-            tasks_api.create_task_every(
-                name=task_name,
-                flux=flux,
-                every='1m' if '1m' in task_name else '1h',
-                organization=org
-            )
-            print(f"Created downsampling task '{task_name}'")
-        except InfluxDBError as e:
-            print(f"Warning: Could not create task '{task_name}': {e}")
+        # Check existing tasks before creating
+        existing_tasks = tasks_api.find_tasks()
+        existing_names = {t.name for t in existing_tasks}
+
+        for task_name, flux in [('downsample_1m', task_1m_flux), ('downsample_1h', task_1h_flux)]:
+            if task_name in existing_names:
+                print(f"Task '{task_name}' already exists, skipping")
+                continue
+            try:
+                tasks_api.create_task_every(
+                    name=task_name,
+                    flux=flux,
+                    every='1m' if '1m' in task_name else '1h',
+                    organization=org_obj
+                )
+                print(f"Created downsampling task '{task_name}'")
+            except InfluxDBError as e:
+                print(f"Warning: Could not create task '{task_name}': {e}")
 
     client.close()
     print("InfluxDB setup complete")
