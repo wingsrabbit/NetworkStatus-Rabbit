@@ -14,9 +14,14 @@ api.interceptors.response.use(
   (res) => res,
   (err) => {
     if (err.response?.status === 401) {
-      const authStore = useAuthStore()
-      authStore.user = null
-      router.push('/login')
+      const url = err.config?.url || ''
+      if (!url.endsWith('/auth/me')) {
+        const authStore = useAuthStore()
+        authStore.user = null
+        if (router.currentRoute.value.path !== '/login') {
+          router.push('/login')
+        }
+      }
     }
     return Promise.reject(err)
   }

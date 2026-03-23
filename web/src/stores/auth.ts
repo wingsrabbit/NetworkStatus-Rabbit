@@ -6,6 +6,7 @@ import { getMe, login as apiLogin, logout as apiLogout } from '@/api/auth'
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null)
   const loading = ref(false)
+  const checked = ref(false)
 
   const isAuthenticated = computed(() => !!user.value)
   const isAdmin = computed(() => user.value?.role === 'admin')
@@ -26,6 +27,8 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function fetchUser() {
+    if (checked.value) return
+    checked.value = true
     try {
       const res = await getMe()
       user.value = res.data.user
@@ -34,5 +37,5 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  return { user, loading, isAuthenticated, isAdmin, login, logout, fetchUser }
+  return { user, loading, checked, isAuthenticated, isAdmin, login, logout, fetchUser }
 })
