@@ -20,7 +20,7 @@ async function handleLogin() {
   try {
     await authStore.login(form.value.username, form.value.password)
     message.success('登录成功')
-    router.push('/')
+    router.push('/dashboard')
   } catch (err: any) {
     const msg = err.response?.data?.error?.message || '登录失败'
     message.error(msg)

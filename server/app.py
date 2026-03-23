@@ -143,23 +143,21 @@ def _start_background_tasks(app):
                 socketio.sleep(10)
 
     def snapshot_pusher():
-        """Push probe snapshots to dashboard every second."""
+        """Push probe snapshots to dashboard every second with real data."""
         with app.app_context():
             while True:
                 try:
-                    # Build snapshot from latest data
-                    # This will be enhanced when we have real probe data flowing
-                    from server.models.task import ProbeTask
-                    from server.models.node import Node
+                    from server.ws.agent_handler import get_latest_results
+                    from server.services.alert_service import get_alert_status
 
-                    tasks = ProbeTask.query.filter_by(enabled=True).all()
+                    latest = get_latest_results()
                     task_data = {}
-                    for t in tasks:
-                        task_data[t.id] = {
-                            'last_latency': None,
-                            'last_packet_loss': None,
-                            'last_success': None,
-                            'status': 'normal',
+                    for task_id, result in latest.items():
+                        task_data[task_id] = {
+                            'last_latency': result.get('latency'),
+                            'last_packet_loss': result.get('packet_loss'),
+                            'last_success': result.get('success'),
+                            'status': get_alert_status(task_id),
                         }
 
                     snapshot = {

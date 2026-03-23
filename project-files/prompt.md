@@ -64,7 +64,7 @@
 
 ### 数据模型
 
-- InfluxDB：Measurement `probe_results`，Tag/Field 定义见 6.1 节
+- InfluxDB：Measurement `probe_result`，Tag/Field 定义见 6.1 节
 - SQLite：`nodes`、`probe_tasks`、`users`、`alert_channels`、`alert_history`、`settings` 表结构见 6.3 节
 - `alert_history` 字段名：`metric`（非 rule_type）、`actual_value`（非 value）、`notified`（非 webhook_sent）
 

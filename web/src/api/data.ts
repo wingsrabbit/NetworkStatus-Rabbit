@@ -1,5 +1,5 @@
 import api from './index'
-import type { DashboardCard, ProbeResult } from '@/types'
+import type { DashboardTask, DashboardNode, DashboardSummary, ProbeResult } from '@/types'
 
 export function getDashboard(params?: {
   protocol?: string
@@ -8,7 +8,7 @@ export function getDashboard(params?: {
   alert_status?: string
   search?: string
 }) {
-  return api.get<{ cards: DashboardCard[]; summary: Record<string, any> }>('/data/dashboard', { params })
+  return api.get<{ nodes: DashboardNode[]; tasks: DashboardTask[]; summary: DashboardSummary }>('/data/dashboard', { params })
 }
 
 export function getTaskData(taskId: string, params?: { range?: string; start?: string; end?: string }) {

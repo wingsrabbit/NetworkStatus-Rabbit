@@ -4,6 +4,7 @@ Handles: agent:auth, agent:heartbeat, agent:probe_result, agent:probe_batch, age
 """
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -23,6 +24,30 @@ logger = logging.getLogger(__name__)
 _agent_sessions = {}
 # Track task_ack retries: node_id -> {config_version, retry_count, last_sent}
 _task_ack_pending = {}
+
+# Latest probe result per task (for dashboard snapshot + REST)
+# key: task_id -> { latency, packet_loss, jitter, success, status_code, timestamp, ... }
+_latest_results: dict[str, dict] = {}
+_latest_lock = threading.Lock()
+
+
+def get_latest_results() -> dict[str, dict]:
+    """Get a snapshot of latest probe results per task for dashboard."""
+    with _latest_lock:
+        return dict(_latest_results)
+
+
+def _update_latest_result(task_id: str, metrics: dict, timestamp=None):
+    """Update the latest probe result cache for a task."""
+    with _latest_lock:
+        _latest_results[task_id] = {
+            'latency': metrics.get('latency'),
+            'packet_loss': metrics.get('packet_loss'),
+            'jitter': metrics.get('jitter'),
+            'success': metrics.get('success'),
+            'status_code': metrics.get('status_code'),
+            'timestamp': timestamp,
+        }
 
 
 class AgentNamespace(Namespace):
@@ -135,6 +160,12 @@ class AgentNamespace(Namespace):
             emit('center:result_ack', {'result_id': result_id})
             return
 
+        # BUG-01: Dedup check before writing
+        if influx_service.check_result_exists(result_id, task_id):
+            logger.debug(f"Duplicate result_id={result_id}, skipping write but ACKing")
+            emit('center:result_ack', {'result_id': result_id})
+            return
+
         source_node = db.session.get(Node, task.source_node_id)
         target_name = task.target_address
         if task.target_type == 'internal' and task.target_node_id:
@@ -152,11 +183,15 @@ class AgentNamespace(Namespace):
                 'timestamp': data.get('timestamp'),
                 'metrics': data.get('metrics', {}),
             })
+            influx_service.mark_result_written(result_id)
         except Exception as e:
             logger.error(f"Failed to write probe result: {e}")
 
         # ACK
         emit('center:result_ack', {'result_id': result_id})
+
+        # Update latest result cache for dashboard
+        _update_latest_result(task_id, data.get('metrics', {}), data.get('timestamp'))
 
         # Push to dashboard subscribers
         from server.ws.dashboard_handler import push_task_detail
@@ -198,6 +233,11 @@ class AgentNamespace(Namespace):
                 accepted_ids.append(result_id)
                 continue
 
+            # BUG-01: Dedup check
+            if influx_service.check_result_exists(result_id, task_id):
+                accepted_ids.append(result_id)
+                continue
+
             source_node = db.session.get(Node, task.source_node_id)
             target_name = task.target_address
             if task.target_type == 'internal' and task.target_node_id:
@@ -214,6 +254,7 @@ class AgentNamespace(Namespace):
                     'timestamp': result.get('timestamp'),
                     'metrics': result.get('metrics', {}),
                 })
+                influx_service.mark_result_written(result_id)
                 accepted_ids.append(result_id)
             except Exception as e:
                 logger.error(f"Failed to write batch result {result_id}: {e}")

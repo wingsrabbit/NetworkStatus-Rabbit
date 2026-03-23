@@ -30,22 +30,22 @@ function renderIcon(icon: any) {
 
 const menuOptions = computed(() => {
   const items: any[] = [
-    { label: '仪表盘', key: '/', icon: renderIcon(HomeOutline) },
+    { label: '仪表盘', key: '/dashboard', icon: renderIcon(HomeOutline) },
   ]
   if (authStore.isAdmin) {
     items.push(
-      { label: '节点管理', key: '/nodes', icon: renderIcon(ServerOutline) },
-      { label: '任务管理', key: '/tasks', icon: renderIcon(ListOutline) },
-      { label: '告警通道', key: '/alerts/channels', icon: renderIcon(NotificationsOutline) },
+      { label: '节点管理', key: '/admin/nodes', icon: renderIcon(ServerOutline) },
+      { label: '任务管理', key: '/admin/tasks', icon: renderIcon(ListOutline) },
+      { label: '告警通道', key: '/admin/alerts', icon: renderIcon(NotificationsOutline) },
     )
   }
   items.push(
-    { label: '告警历史', key: '/alerts/history', icon: renderIcon(TimeOutline) },
+    { label: '告警历史', key: '/admin/alerts/history', icon: renderIcon(TimeOutline) },
   )
   if (authStore.isAdmin) {
     items.push(
-      { label: '用户管理', key: '/users', icon: renderIcon(PeopleOutline) },
-      { label: '系统设置', key: '/settings', icon: renderIcon(SettingsOutline) },
+      { label: '用户管理', key: '/admin/users', icon: renderIcon(PeopleOutline) },
+      { label: '系统设置', key: '/admin/settings', icon: renderIcon(SettingsOutline) },
     )
   }
   return items

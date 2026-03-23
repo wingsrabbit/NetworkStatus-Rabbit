@@ -11,7 +11,7 @@ import { useSocket } from '@/composables/useSocket'
 import type { ProbeResult } from '@/types'
 
 const route = useRoute()
-const taskId = route.params.id as string
+const taskId = route.params.taskId as string
 const { subscribeTask, unsubscribeTask, socket } = useSocket()
 
 const chartRef = ref<HTMLDivElement>()
@@ -163,7 +163,7 @@ watch(range, () => fetchData())
       </NGi>
       <NGi>
         <NCard>
-          <NStatistic label="数据点数" :value="stats.count ?? '-'" />
+          <NStatistic label="数据点数" :value="stats.total_probes ?? '-'" />
         </NCard>
       </NGi>
     </NGrid>

@@ -1,11 +1,21 @@
 """InfluxDB read/write service."""
 import logging
+import threading
+import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
 
 logger = logging.getLogger(__name__)
+
+# In-memory dedup cache: result_id -> insertion_time
+# Evicts entries older than _DEDUP_TTL seconds, capped at _DEDUP_MAX_SIZE
+_DEDUP_TTL = 600  # 10 minutes
+_DEDUP_MAX_SIZE = 100_000
+_dedup_cache: OrderedDict[str, float] = OrderedDict()
+_dedup_lock = threading.Lock()
 
 
 class InfluxService:
@@ -80,13 +90,30 @@ class InfluxService:
         self.write_api.write(bucket=self.bucket_raw, record=point)
 
     def check_result_exists(self, result_id, task_id):
-        """Check if a result_id already exists (for dedup). Simple approach using tag."""
-        # For dedup, we rely on the result_id being part of the data.
-        # Since InfluxDB doesn't have a simple "exists by field" query efficiently,
-        # we use an in-memory set in the caller or a simple query for recent data.
-        # For MVP, we'll skip the heavy query and rely on the fact that
-        # writing the same point (same tags + timestamp) is idempotent in InfluxDB.
-        return False
+        """Check if a result_id already exists using in-memory dedup cache."""
+        if not result_id:
+            return False
+        now = time.time()
+        with _dedup_lock:
+            # Evict expired entries
+            while _dedup_cache:
+                oldest_key, oldest_time = next(iter(_dedup_cache.items()))
+                if now - oldest_time > _DEDUP_TTL:
+                    _dedup_cache.pop(oldest_key)
+                else:
+                    break
+            return result_id in _dedup_cache
+
+    def mark_result_written(self, result_id):
+        """Mark a result_id as written in the dedup cache."""
+        if not result_id:
+            return
+        with _dedup_lock:
+            _dedup_cache[result_id] = time.time()
+            _dedup_cache.move_to_end(result_id)
+            # Cap size
+            while len(_dedup_cache) > _DEDUP_MAX_SIZE:
+                _dedup_cache.popitem(last=False)
 
     def query_task_data(self, task_id, time_range='6h'):
         """Query time-series data for a specific task."""

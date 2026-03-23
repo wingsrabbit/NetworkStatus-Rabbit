@@ -14,6 +14,9 @@ data_bp = Blueprint('data', __name__)
 @data_bp.route('/dashboard', methods=['GET'])
 @login_required
 def dashboard():
+    from server.ws.agent_handler import get_latest_results
+    from server.services.alert_service import get_alert_status
+
     # Optional filters
     protocol_filter = request.args.get('protocol')
     label_filter = request.args.get('label')
@@ -21,7 +24,7 @@ def dashboard():
     alert_status_filter = request.args.get('alert_status')
     search_filter = request.args.get('search')
 
-    # Query nodes into a lookup dict
+    # Query nodes
     nodes_query = Node.query
     if status_filter:
         nodes_query = nodes_query.filter_by(status=status_filter)
@@ -40,10 +43,7 @@ def dashboard():
     tasks_query = ProbeTask.query
     if protocol_filter:
         tasks_query = tasks_query.filter_by(protocol=protocol_filter)
-
-    # BUG-B02: search covers task name, node name, target address
     if search_filter:
-        # Get node IDs matching search
         matching_node_ids = [n.id for n in Node.query.filter(
             Node.name.ilike(f'%{search_filter}%')
         ).all()]
@@ -55,10 +55,14 @@ def dashboard():
             )
         )
 
-    tasks = tasks_query.order_by(ProbeTask.name.asc()).all()
+    tasks = tasks_query.all()
 
-    # Build cards for frontend
-    cards = []
+    # Get latest results and alert states
+    latest_results = get_latest_results()
+
+    # Build tasks list per spec: {nodes, tasks, summary}
+    task_list = []
+    alerting_count = 0
     for t in tasks:
         source = node_map.get(t.source_node_id) or db.session.get(Node, t.source_node_id)
         target_name = t.target_address
@@ -66,35 +70,56 @@ def dashboard():
             target = db.session.get(Node, t.target_node_id)
             target_name = target.name if target else t.target_node_id
 
-        cards.append({
+        # Real latest data from in-memory cache
+        latest = latest_results.get(t.id)
+
+        # Real alert status from alert state machine
+        a_status = get_alert_status(t.id)
+        if a_status == 'alerting':
+            alerting_count += 1
+
+        task_list.append({
             'task_id': t.id,
-            'task_name': t.name,
+            'name': t.name,
+            'source_node': source.name if source else t.source_node_id,
+            'target': target_name or '',
             'protocol': t.protocol,
-            'source_node_id': t.source_node_id,
-            'source_node_name': source.name if source else t.source_node_id,
-            'source_node_status': source.status if source else 'offline',
-            'target_address': target_name or '',
-            'target_type': t.target_type,
-            'target_node_id': t.target_node_id,
             'enabled': t.enabled,
-            'latest': None,
-            'alert_status': 'normal',
+            'latest': latest,
+            'alert_status': a_status,
         })
 
-    # BUG-B02: Sort alerting tasks first
-    cards.sort(key=lambda c: (0 if c['alert_status'] != 'normal' else 1, c['task_name'] or ''))
+    # Filter by alert_status if requested
+    if alert_status_filter:
+        task_list = [t for t in task_list if t['alert_status'] == alert_status_filter]
+
+    # Sort: alerting first, then by name
+    task_list.sort(key=lambda t: (0 if t['alert_status'] == 'alerting' else 1, t['name'] or ''))
 
     online_count = sum(1 for n in nodes if n.status == 'online')
     offline_count = sum(1 for n in nodes if n.status == 'offline')
 
+    # Build nodes list per spec
+    node_list = []
+    for n in nodes:
+        node_list.append({
+            'id': n.id,
+            'name': n.name,
+            'status': n.status,
+            'labels': [n.label_1, n.label_2, n.label_3],
+            'capabilities': n._parse_capabilities(),
+            'last_seen': n.last_seen.isoformat() + 'Z' if n.last_seen else None,
+        })
+
     return jsonify({
-        'cards': cards,
+        'nodes': node_list,
+        'tasks': task_list,
         'summary': {
             'total_nodes': len(nodes),
             'online_nodes': online_count,
             'offline_nodes': offline_count,
             'total_tasks': len(tasks),
-            'alerting_tasks': 0,
+            'alerting_tasks': alerting_count,
         }
     }), 200
 

@@ -5,7 +5,7 @@ import {
   NGrid, NGi, NCard, NStatistic, NTag, NSpace, NInput, NSelect, NSpin, NEmpty, NBadge
 } from 'naive-ui'
 import { useDashboardStore } from '@/stores/dashboard'
-import type { DashboardCard } from '@/types'
+import type { DashboardTask } from '@/types'
 
 const router = useRouter()
 const store = useDashboardStore()
@@ -29,32 +29,25 @@ const statusOptions = [
 ]
 
 onMounted(() => {
-  store.fetchCards()
+  store.fetchDashboard()
 })
 
-const filteredCards = computed(() => {
-  let result = store.cards
+const filteredTasks = computed(() => {
+  let result = store.tasks
   if (search.value) {
     const s = search.value.toLowerCase()
     result = result.filter(
-      (c) =>
-        c.task_name.toLowerCase().includes(s) ||
-        c.target_address.toLowerCase().includes(s) ||
-        c.source_node_name.toLowerCase().includes(s)
+      (t) =>
+        t.name.toLowerCase().includes(s) ||
+        t.target.toLowerCase().includes(s) ||
+        t.source_node.toLowerCase().includes(s)
     )
   }
   if (protocolFilter.value) {
-    result = result.filter((c) => c.protocol === protocolFilter.value)
-  }
-  if (statusFilter.value) {
-    result = result.filter((c) => c.source_node_status === statusFilter.value)
+    result = result.filter((t) => t.protocol === protocolFilter.value)
   }
   return result
 })
-
-function statusColor(status: string) {
-  return status === 'online' ? 'success' : 'error'
-}
 
 function latencyColor(latency: number | null | undefined) {
   if (latency == null) return 'default'
@@ -68,44 +61,48 @@ function formatLatency(val: number | null | undefined) {
   return `${val.toFixed(1)} ms`
 }
 
-function goToDetail(card: DashboardCard) {
-  router.push(`/task/${card.task_id}`)
+function goToDetail(task: DashboardTask) {
+  router.push(`/dashboard/${task.task_id}`)
 }
 </script>
 
 <template>
   <div>
+    <!-- Summary bar -->
+    <NGrid :x-gap="16" :y-gap="16" cols="2 m:4" responsive="screen" style="margin-bottom: 16px">
+      <NGi><NCard><NStatistic label="节点数" :value="store.summary.total_nodes" /></NCard></NGi>
+      <NGi><NCard><NStatistic label="任务数" :value="store.summary.total_tasks" /></NCard></NGi>
+      <NGi><NCard><NStatistic label="在线" :value="store.summary.online_nodes" /></NCard></NGi>
+      <NGi><NCard><NStatistic label="告警" :value="store.summary.alerting_tasks" /></NCard></NGi>
+    </NGrid>
+
     <NSpace style="margin-bottom: 16px;" align="center">
       <NInput v-model:value="search" placeholder="搜索任务/目标/节点" clearable style="width: 250px" />
       <NSelect v-model:value="protocolFilter" :options="protocolOptions" placeholder="协议" style="width: 120px" clearable />
-      <NSelect v-model:value="statusFilter" :options="statusOptions" placeholder="状态" style="width: 120px" clearable />
     </NSpace>
 
     <NSpin :show="store.loading">
-      <NEmpty v-if="filteredCards.length === 0 && !store.loading" description="暂无数据" />
+      <NEmpty v-if="filteredTasks.length === 0 && !store.loading" description="暂无数据" />
       <NGrid v-else :x-gap="16" :y-gap="16" cols="1 s:2 m:3 l:4" responsive="screen">
-        <NGi v-for="card in filteredCards" :key="card.task_id">
-          <NCard hoverable style="cursor: pointer" @click="goToDetail(card)">
+        <NGi v-for="task in filteredTasks" :key="task.task_id">
+          <NCard hoverable style="cursor: pointer" @click="goToDetail(task)">
             <template #header>
               <NSpace align="center" justify="space-between" style="width: 100%">
-                <span>{{ card.task_name }}</span>
+                <span>{{ task.name }}</span>
                 <NSpace :size="4">
-                  <NTag :type="statusColor(card.source_node_status)" size="small" round>
-                    {{ card.source_node_status === 'online' ? '在线' : '离线' }}
-                  </NTag>
-                  <NTag size="small" round>{{ card.protocol.toUpperCase() }}</NTag>
-                  <NBadge v-if="card.alert_status === 'triggered'" dot type="error" />
+                  <NTag size="small" round>{{ task.protocol.toUpperCase() }}</NTag>
+                  <NBadge v-if="task.alert_status === 'alerting'" dot type="error" />
                 </NSpace>
               </NSpace>
             </template>
             <NSpace vertical :size="8">
               <div style="color: var(--n-text-color-3); font-size: 13px;">
-                {{ card.source_node_name }} → {{ card.target_address }}
+                {{ task.source_node }} → {{ task.target }}
               </div>
               <NSpace :size="24">
-                <NStatistic label="延迟" :value="formatLatency(card.latest?.latency)" />
-                <NStatistic v-if="card.latest?.packet_loss != null" label="丢包" :value="`${card.latest.packet_loss}%`" />
-                <NStatistic v-if="card.latest?.status_code != null" label="状态码" :value="card.latest.status_code" />
+                <NStatistic label="延迟" :value="formatLatency(task.latest?.latency)" />
+                <NStatistic v-if="task.latest?.packet_loss != null" label="丢包" :value="`${task.latest.packet_loss}%`" />
+                <NStatistic v-if="task.latest?.status_code != null" label="状态码" :value="task.latest.status_code" />
               </NSpace>
             </NSpace>
           </NCard>

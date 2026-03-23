@@ -67,7 +67,7 @@ export interface AlertHistory {
   id: string
   task_id: string
   task_name?: string
-  event_type: 'triggered' | 'recovered'
+  event_type: 'alert' | 'recovery'
   metric: string
   actual_value: number
   threshold: number
@@ -90,18 +90,39 @@ export interface ProbeResult {
   resolved_ip: string | null
 }
 
-export interface DashboardCard {
+export interface DashboardTask {
   task_id: string
-  task_name: string
+  name: string
+  source_node: string
+  target: string
   protocol: string
-  source_node_id: string
-  source_node_name: string
-  source_node_status: string
-  target_address: string
-  target_type: string
-  target_node_id: string | null
-  latest: ProbeResult | null
-  alert_status: 'normal' | 'triggered' | null
+  enabled: boolean
+  latest: {
+    latency: number | null
+    packet_loss: number | null
+    jitter: number | null
+    success: boolean | null
+    status_code: number | null
+    timestamp: string | null
+  } | null
+  alert_status: 'normal' | 'alerting'
+}
+
+export interface DashboardNode {
+  id: string
+  name: string
+  status: string
+  labels: (string | null)[]
+  capabilities: any
+  last_seen: string | null
+}
+
+export interface DashboardSummary {
+  total_nodes: number
+  online_nodes: number
+  offline_nodes: number
+  total_tasks: number
+  alerting_tasks: number
 }
 
 export interface Pagination {

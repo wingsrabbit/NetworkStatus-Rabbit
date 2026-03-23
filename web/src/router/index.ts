@@ -15,46 +15,50 @@ const routes: RouteRecordRaw[] = [
     children: [
       {
         path: '',
+        redirect: '/dashboard',
+      },
+      {
+        path: 'dashboard',
         name: 'Dashboard',
         component: () => import('@/views/DashboardView.vue'),
       },
       {
-        path: 'task/:id',
+        path: 'dashboard/:taskId',
         name: 'TaskDetail',
         component: () => import('@/views/TaskDetailView.vue'),
         props: true,
       },
       {
-        path: 'nodes',
+        path: 'admin/nodes',
         name: 'Nodes',
         component: () => import('@/views/admin/NodesView.vue'),
         meta: { requiresAdmin: true },
       },
       {
-        path: 'tasks',
+        path: 'admin/tasks',
         name: 'Tasks',
         component: () => import('@/views/admin/TasksView.vue'),
         meta: { requiresAdmin: true },
       },
       {
-        path: 'alerts/channels',
+        path: 'admin/alerts',
         name: 'AlertChannels',
         component: () => import('@/views/admin/AlertChannelsView.vue'),
         meta: { requiresAdmin: true },
       },
       {
-        path: 'alerts/history',
+        path: 'admin/alerts/history',
         name: 'AlertHistory',
         component: () => import('@/views/admin/AlertHistoryView.vue'),
       },
       {
-        path: 'users',
+        path: 'admin/users',
         name: 'Users',
         component: () => import('@/views/admin/UsersView.vue'),
         meta: { requiresAdmin: true },
       },
       {
-        path: 'settings',
+        path: 'admin/settings',
         name: 'Settings',
         component: () => import('@/views/admin/SettingsView.vue'),
         meta: { requiresAdmin: true },
@@ -80,11 +84,11 @@ router.beforeEach(async (to, _from, next) => {
   }
 
   if (to.meta.requiresAdmin && !authStore.isAdmin) {
-    return next('/')
+    return next('/dashboard')
   }
 
   if (to.path === '/login' && authStore.isAuthenticated) {
-    return next('/')
+    return next('/dashboard')
   }
 
   next()

@@ -17,8 +17,8 @@ const eventFilter = ref<string | null>(null)
 
 const eventOptions = [
   { label: '全部', value: '' },
-  { label: '触发', value: 'triggered' },
-  { label: '恢复', value: 'recovered' },
+  { label: '告警', value: 'alert' },
+  { label: '恢复', value: 'recovery' },
 ]
 
 async function fetchHistory() {
@@ -39,7 +39,7 @@ const columns: DataTableColumns<AlertHistory> = [
   { title: '任务ID', key: 'task_id', width: 220, ellipsis: { tooltip: true } },
   {
     title: '事件', key: 'event_type', width: 80,
-    render: (row) => h(NTag, { type: row.event_type === 'triggered' ? 'error' : 'success', size: 'small' }, { default: () => row.event_type === 'triggered' ? '触发' : '恢复' }),
+    render: (row) => h(NTag, { type: row.event_type === 'alert' ? 'error' : 'success', size: 'small' }, { default: () => row.event_type === 'alert' ? '告警' : '恢复' }),
   },
   { title: '指标', key: 'metric', width: 100 },
   {

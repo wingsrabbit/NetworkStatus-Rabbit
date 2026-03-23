@@ -1,15 +1,17 @@
 """Alert engine service - window-based evaluation with state machine.
 
-States per task: normal -> triggered -> (cooldown) -> normal
-Evaluation rules (per v1.5):
-  - latency > alert_latency_threshold
-  - packet_loss > alert_loss_threshold
-  - continuous_fail >= alert_fail_count
-Uses sliding window (alert_eval_window), trigger/recovery counts, cooldown.
+States per (task_id, metric): normal -> alerting -> normal
+Evaluation (PROJECT.md §12.1):
+  - Sliding window of last N results per (task_id, metric)
+  - Trigger: window has >= M breaches
+  - Recovery: consecutive K normal results
+  - Cooldown: same (task_id, metric) won't re-alert within cooldown_seconds
+Event types: 'alert' / 'recovery' (PROJECT.md §6.3)
+Alert status: 'normal' / 'alerting' (PROJECT.md §8.2)
 """
 import logging
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from threading import Lock
 
@@ -17,24 +19,33 @@ from server.extensions import db
 
 logger = logging.getLogger(__name__)
 
-# Per-task, per-metric state
-# key: (task_id, metric_name) -> 'normal' | 'triggered'
+# Sliding window of breach booleans per (task_id, metric)
+_windows: dict[tuple[str, str], deque[bool]] = {}
+# Alert state: 'normal' | 'alerting'
 _alert_state: dict[tuple[str, str], str] = {}
-# Consecutive breach counts: (task_id, metric) -> int
-_breach_counts: dict[tuple[str, str], int] = defaultdict(int)
-# Consecutive OK counts: (task_id, metric) -> int
+# Consecutive OK counts for recovery
 _ok_counts: dict[tuple[str, str], int] = defaultdict(int)
-# Last alert time for cooldown: (task_id, metric) -> timestamp
+# Last alert time for cooldown
 _last_alert_time: dict[tuple[str, str], float] = {}
-# Continuous fail counter: task_id -> int
+# Continuous fail counter per task
 _fail_counts: dict[str, int] = defaultdict(int)
 _lock = Lock()
 
 
+def get_alert_status(task_id: str) -> str:
+    """Get current alert status: 'normal' or 'alerting'."""
+    with _lock:
+        for (tid, _), state in _alert_state.items():
+            if tid == task_id and state == 'alerting':
+                return 'alerting'
+    return 'normal'
+
+
 def _check_threshold(task_id: str, metric_name: str, value: float,
-                     threshold: float, trigger_count: int,
-                     recovery_count: int, cooldown: int):
-    """Generic threshold check with state machine. Returns event or None."""
+                     threshold: float, eval_window: int,
+                     trigger_count: int, recovery_count: int,
+                     cooldown: int):
+    """Window-based threshold check. Returns 'alert', 'recovery', or None."""
     key = (task_id, metric_name)
     is_breach = value > threshold
 
@@ -42,27 +53,32 @@ def _check_threshold(task_id: str, metric_name: str, value: float,
         state = _alert_state.get(key, 'normal')
         now = time.time()
 
+        # Ensure window exists with correct maxlen
+        if key not in _windows or _windows[key].maxlen != eval_window:
+            old = _windows.get(key, deque())
+            _windows[key] = deque(old, maxlen=eval_window)
+        _windows[key].append(is_breach)
+
         if is_breach:
-            _breach_counts[key] += 1
             _ok_counts[key] = 0
         else:
             _ok_counts[key] += 1
-            _breach_counts[key] = 0
 
         if state == 'normal':
-            if _breach_counts[key] >= trigger_count:
+            breach_count = sum(1 for b in _windows[key] if b)
+            if breach_count >= trigger_count:
                 last = _last_alert_time.get(key, 0)
                 if now - last >= cooldown:
-                    _alert_state[key] = 'triggered'
+                    _alert_state[key] = 'alerting'
                     _last_alert_time[key] = now
-                    _breach_counts[key] = 0
-                    return 'triggered'
+                    _ok_counts[key] = 0
+                    return 'alert'
 
-        elif state == 'triggered':
+        elif state == 'alerting':
             if _ok_counts[key] >= recovery_count:
                 _alert_state[key] = 'normal'
                 _ok_counts[key] = 0
-                return 'recovered'
+                return 'recovery'
 
     return None
 
@@ -85,6 +101,7 @@ def evaluate_probe_result(task_id: str, metrics: dict):
     if not has_alert:
         return []
 
+    eval_window = task.alert_eval_window
     trigger_count = task.alert_trigger_count
     recovery_count = task.alert_recovery_count
     cooldown = task.alert_cooldown_seconds
@@ -99,7 +116,7 @@ def evaluate_probe_result(task_id: str, metrics: dict):
                 event = _check_threshold(
                     task_id, 'latency', latency,
                     task.alert_latency_threshold,
-                    trigger_count, recovery_count, cooldown)
+                    eval_window, trigger_count, recovery_count, cooldown)
                 if event:
                     events.append((event, 'latency', latency, task.alert_latency_threshold))
             except (ValueError, TypeError):
@@ -114,7 +131,7 @@ def evaluate_probe_result(task_id: str, metrics: dict):
                 event = _check_threshold(
                     task_id, 'packet_loss', loss,
                     task.alert_loss_threshold,
-                    trigger_count, recovery_count, cooldown)
+                    eval_window, trigger_count, recovery_count, cooldown)
                 if event:
                     events.append((event, 'packet_loss', loss, task.alert_loss_threshold))
             except (ValueError, TypeError):
@@ -134,7 +151,7 @@ def evaluate_probe_result(task_id: str, metrics: dict):
         event = _check_threshold(
             task_id, 'continuous_fail', fail_val,
             float(task.alert_fail_count),
-            trigger_count, recovery_count, cooldown)
+            eval_window, trigger_count, recovery_count, cooldown)
         if event:
             events.append((event, 'continuous_fail', fail_val, float(task.alert_fail_count)))
 

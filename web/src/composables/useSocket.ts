@@ -29,11 +29,16 @@ export function useSocket() {
       console.error('[WS] Connection error:', code, err.message)
     })
 
-    s.on('dashboard:task_detail', (data: any) => {
+    // BUG-03: Listen to probe_snapshot for real-time dashboard updates
+    s.on('dashboard:probe_snapshot', (data: any) => {
       const store = useDashboardStore()
-      store.updateCard(data.task_id, {
-        latest: data.result,
-      })
+      if (data.tasks) {
+        store.updateTaskSnapshot(data.tasks)
+      }
+    })
+
+    s.on('dashboard:task_detail', (data: any) => {
+      // Only used by TaskDetailView subscribers, not dashboard
     })
 
     s.on('dashboard:node_status', (data: any) => {
@@ -43,8 +48,9 @@ export function useSocket() {
 
     s.on('dashboard:alert', (data: any) => {
       const store = useDashboardStore()
-      store.updateCard(data.task_id, {
-        alert_status: data.event_type === 'triggered' ? 'triggered' : 'normal',
+      // BUG-06: Use 'alerting' not 'triggered'
+      store.updateTask(data.task_id, {
+        alert_status: data.event_type === 'alert' ? 'alerting' : 'normal',
       })
     })
   }
