@@ -24,14 +24,15 @@ export function useSocket() {
       console.log('[WS] Dashboard disconnected:', reason)
     })
 
-    s.on('connect_error', (err: Error) => {
-      console.error('[WS] Connection error:', err.message)
+    s.on('connect_error', (err: any) => {
+      const code = err?.data?.code || 'UNKNOWN'
+      console.error('[WS] Connection error:', code, err.message)
     })
 
-    s.on('dashboard:task_update', (data: any) => {
+    s.on('dashboard:task_detail', (data: any) => {
       const store = useDashboardStore()
       store.updateCard(data.task_id, {
-        latest: data.latest,
+        latest: data.result,
       })
     })
 
@@ -53,12 +54,12 @@ export function useSocket() {
     socket.value = null
   }
 
-  function subscribeTask(taskId: number) {
-    socket.value?.emit('subscribe_task', { task_id: taskId })
+  function subscribeTask(taskId: string) {
+    socket.value?.emit('dashboard:subscribe_task', { task_id: taskId })
   }
 
-  function unsubscribeTask(taskId: number) {
-    socket.value?.emit('unsubscribe_task', { task_id: taskId })
+  function unsubscribeTask(taskId: string) {
+    socket.value?.emit('dashboard:unsubscribe_task', { task_id: taskId })
   }
 
   return { socket, connect, disconnect, subscribeTask, unsubscribeTask }

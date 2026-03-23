@@ -13,4 +13,4 @@ RUN mkdir -p /app/data
 
 EXPOSE 5000
 
-CMD ["python", "-m", "flask", "--app", "server.app:create_app", "run", "--host", "0.0.0.0", "--port", "5000"]
+CMD ["python", "-c", "from server.app import create_app; from server.extensions import socketio; app = create_app(); socketio.run(app, host='0.0.0.0', port=5000)"]

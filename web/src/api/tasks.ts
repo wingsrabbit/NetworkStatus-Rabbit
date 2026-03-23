@@ -9,14 +9,14 @@ export function createTask(data: Partial<ProbeTask>) {
   return api.post<{ task: ProbeTask }>('/tasks', data)
 }
 
-export function updateTask(id: number, data: Partial<ProbeTask>) {
+export function updateTask(id: string, data: Partial<ProbeTask>) {
   return api.put<{ task: ProbeTask }>(`/tasks/${id}`, data)
 }
 
-export function deleteTask(id: number) {
+export function deleteTask(id: string) {
   return api.delete(`/tasks/${id}`)
 }
 
-export function toggleTask(id: number) {
-  return api.put<{ task: ProbeTask }>(`/tasks/${id}/toggle`)
+export function toggleTask(id: string, enabled: boolean) {
+  return api.put<{ task: ProbeTask }>(`/tasks/${id}/toggle`, { enabled })
 }

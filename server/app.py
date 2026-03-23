@@ -107,7 +107,8 @@ def _start_background_tasks(app):
     from datetime import datetime, timezone
 
     def heartbeat_checker():
-        """Check node heartbeats and update status every 10 seconds."""
+        """Check node heartbeats and update status every 10 seconds.
+        Also batch-flushes last_seen to DB (BUG-B05)."""
         with app.app_context():
             while True:
                 try:
@@ -120,16 +121,22 @@ def _start_background_tasks(app):
                         Node.enabled == True
                     ).all()
 
+                    now = datetime.now(timezone.utc)
                     for node in nodes:
                         is_online = node_service.is_node_online(node.id)
                         new_status = 'online' if is_online else 'offline'
 
+                        # Batch-update last_seen for online nodes
+                        if is_online:
+                            node.last_seen = now
+
                         if node.status != new_status:
                             old_status = node.status
                             node.status = new_status
-                            db.session.commit()
                             push_node_status(node.id, node.name, new_status)
                             logging.info(f"Node {node.name} status changed: {old_status} -> {new_status}")
+
+                    db.session.commit()
                 except Exception as e:
                     logging.error(f"Heartbeat checker error: {e}")
 
@@ -165,5 +172,28 @@ def _start_background_tasks(app):
 
                 socketio.sleep(1)
 
+    def sync_retry_checker():
+        """Check for pending task syncs that need retry (every 10 seconds)."""
+        with app.app_context():
+            while True:
+                try:
+                    from server.services import task_service, node_service
+                    retries = task_service.check_pending_syncs()
+                    for node_id, config_version in retries:
+                        sid = node_service.get_connection_sid(node_id)
+                        if sid:
+                            tasks = task_service.get_tasks_for_node(node_id)
+                            socketio.emit('center:task_sync', {
+                                'config_version': config_version,
+                                'tasks': [t.to_agent_dict() for t in tasks]
+                            }, to=sid, namespace='/agent')
+                        else:
+                            task_service.mark_sync_desync(node_id)
+                except Exception as e:
+                    logging.error(f"Sync retry checker error: {e}")
+
+                socketio.sleep(10)
+
     socketio.start_background_task(heartbeat_checker)
     socketio.start_background_task(snapshot_pusher)
+    socketio.start_background_task(sync_retry_checker)

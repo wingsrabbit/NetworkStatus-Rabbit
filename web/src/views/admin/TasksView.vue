@@ -2,7 +2,7 @@
 import { onMounted, ref, h, computed } from 'vue'
 import {
   NDataTable, NButton, NSpace, NModal, NForm, NFormItem, NInput,
-  NSelect, NInputNumber, NSwitch, NTag, NPopconfirm, useMessage, NPageHeader
+  NSelect, NInputNumber, NTag, NPopconfirm, useMessage, NPageHeader
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { getTasks, createTask, updateTask, deleteTask, toggleTask } from '@/api/tasks'
@@ -18,7 +18,7 @@ const loading = ref(false)
 
 const showForm = ref(false)
 const isEdit = ref(false)
-const editingId = ref(0)
+const editingId = ref('')
 
 const defaultForm = (): Partial<ProbeTask> => ({
   name: '',
@@ -30,11 +30,9 @@ const defaultForm = (): Partial<ProbeTask> => ({
   target_port: null,
   interval: 5,
   timeout: 10,
-  enabled: true,
-  alert_enabled: false,
-  alert_metric: 'latency',
-  alert_operator: '>',
-  alert_threshold: null,
+  alert_latency_threshold: null,
+  alert_loss_threshold: null,
+  alert_fail_count: null,
   alert_eval_window: 5,
   alert_trigger_count: 3,
   alert_recovery_count: 3,
@@ -53,22 +51,7 @@ const protocolOptions = [
 
 const targetTypeOptions = [
   { label: '外部目标', value: 'external' },
-  { label: '内部节点', value: 'node' },
-]
-
-const metricOptions = [
-  { label: '延迟', value: 'latency' },
-  { label: '丢包率', value: 'packet_loss' },
-  { label: '状态', value: 'status' },
-]
-
-const operatorOptions = [
-  { label: '>', value: '>' },
-  { label: '>=', value: '>=' },
-  { label: '<', value: '<' },
-  { label: '<=', value: '<=' },
-  { label: '==', value: '==' },
-  { label: '!=', value: '!=' },
+  { label: '内部节点', value: 'internal' },
 ]
 
 const nodeOptions = computed(() =>
@@ -76,6 +59,12 @@ const nodeOptions = computed(() =>
 )
 
 const needsPort = computed(() => ['tcp', 'udp'].includes(form.value.protocol || ''))
+
+const hasAlert = computed(() =>
+  form.value.alert_latency_threshold != null ||
+  form.value.alert_loss_threshold != null ||
+  form.value.alert_fail_count != null
+)
 
 async function fetchData() {
   loading.value = true
@@ -85,7 +74,7 @@ async function fetchData() {
       getNodes({ per_page: 100 }),
     ])
     tasks.value = taskRes.data.items
-    total.value = taskRes.data.total
+    total.value = taskRes.data.pagination.total
     nodes.value = nodeRes.data.items
   } finally {
     loading.value = false
@@ -125,7 +114,7 @@ async function handleSubmit() {
   }
 }
 
-async function handleDelete(id: number) {
+async function handleDelete(id: string) {
   try {
     await deleteTask(id)
     message.success('删除成功')
@@ -135,9 +124,9 @@ async function handleDelete(id: number) {
   }
 }
 
-async function handleToggle(id: number) {
+async function handleToggle(task: ProbeTask) {
   try {
-    await toggleTask(id)
+    await toggleTask(task.id, !task.enabled)
     fetchData()
   } catch (err: any) {
     message.error(err.response?.data?.error?.message || '操作失败')
@@ -145,7 +134,7 @@ async function handleToggle(id: number) {
 }
 
 const columns: DataTableColumns<ProbeTask> = [
-  { title: 'ID', key: 'id', width: 60 },
+  { title: 'ID', key: 'id', width: 220, ellipsis: { tooltip: true } },
   { title: '名称', key: 'name', width: 160 },
   {
     title: '协议', key: 'protocol', width: 80,
@@ -159,15 +148,20 @@ const columns: DataTableColumns<ProbeTask> = [
     render: (row) => h(NTag, { type: row.enabled ? 'success' : 'default', size: 'small' }, { default: () => row.enabled ? '是' : '否' }),
   },
   {
-    title: '告警', key: 'alert_enabled', width: 70,
-    render: (row) => h(NTag, { type: row.alert_enabled ? 'warning' : 'default', size: 'small' }, { default: () => row.alert_enabled ? '开' : '关' }),
+    title: '告警', key: 'alert', width: 70,
+    render: (row) => {
+      const has = row.alert_latency_threshold != null ||
+                  row.alert_loss_threshold != null ||
+                  row.alert_fail_count != null
+      return h(NTag, { type: has ? 'warning' : 'default', size: 'small' }, { default: () => has ? '开' : '关' })
+    },
   },
   {
     title: '操作', key: 'actions', width: 220,
     render: (row) => h(NSpace, { size: 4 }, {
       default: () => [
         h(NButton, { size: 'small', onClick: () => openEdit(row) }, { default: () => '编辑' }),
-        h(NButton, { size: 'small', type: row.enabled ? 'warning' : 'success', onClick: () => handleToggle(row.id) }, { default: () => row.enabled ? '禁用' : '启用' }),
+        h(NButton, { size: 'small', type: row.enabled ? 'warning' : 'success', onClick: () => handleToggle(row) }, { default: () => row.enabled ? '禁用' : '启用' }),
         h(NPopconfirm, { onPositiveClick: () => handleDelete(row.id) }, {
           trigger: () => h(NButton, { size: 'small', type: 'error' }, { default: () => '删除' }),
           default: () => '确定删除？',
@@ -197,7 +191,7 @@ onMounted(fetchData)
     />
 
     <NModal v-model:show="showForm" preset="card" :title="isEdit ? '编辑任务' : '添加任务'" style="width: 600px">
-      <NForm label-placement="left" label-width="100">
+      <NForm label-placement="left" label-width="120">
         <NFormItem label="名称" required>
           <NInput v-model:value="form.name" />
         </NFormItem>
@@ -210,7 +204,7 @@ onMounted(fetchData)
         <NFormItem label="目标类型">
           <NSelect v-model:value="form.target_type" :options="targetTypeOptions" />
         </NFormItem>
-        <NFormItem v-if="form.target_type === 'node'" label="目标节点">
+        <NFormItem v-if="form.target_type === 'internal'" label="目标节点">
           <NSelect v-model:value="form.target_node_id" :options="nodeOptions" filterable />
         </NFormItem>
         <NFormItem v-else label="目标地址">
@@ -226,19 +220,16 @@ onMounted(fetchData)
           <NInputNumber v-model:value="form.timeout" :min="1" :max="30" style="width: 100%" />
         </NFormItem>
 
-        <NFormItem label="告警">
-          <NSwitch v-model:value="form.alert_enabled" />
+        <NFormItem label="延迟阈值 (ms)">
+          <NInputNumber v-model:value="form.alert_latency_threshold" :min="0" placeholder="留空则不监控" style="width: 100%" clearable />
         </NFormItem>
-        <template v-if="form.alert_enabled">
-          <NFormItem label="监控指标">
-            <NSelect v-model:value="form.alert_metric" :options="metricOptions" />
-          </NFormItem>
-          <NFormItem label="操作符">
-            <NSelect v-model:value="form.alert_operator" :options="operatorOptions" />
-          </NFormItem>
-          <NFormItem label="阈值">
-            <NInputNumber v-model:value="form.alert_threshold" style="width: 100%" />
-          </NFormItem>
+        <NFormItem label="丢包率阈值 (%)">
+          <NInputNumber v-model:value="form.alert_loss_threshold" :min="0" :max="100" placeholder="留空则不监控" style="width: 100%" clearable />
+        </NFormItem>
+        <NFormItem label="连续失败次数">
+          <NInputNumber v-model:value="form.alert_fail_count" :min="1" placeholder="留空则不监控" style="width: 100%" clearable />
+        </NFormItem>
+        <template v-if="hasAlert">
           <NFormItem label="评估窗口">
             <NInputNumber v-model:value="form.alert_eval_window" :min="1" style="width: 100%" />
           </NFormItem>

@@ -17,14 +17,14 @@ const loading = ref(false)
 
 const showForm = ref(false)
 const isEdit = ref(false)
-const editingId = ref(0)
+const editingId = ref('')
 const form = ref({ name: '', type: 'webhook', url: '', enabled: true })
 
 async function fetchChannels() {
   loading.value = true
   try {
     const res = await getAlertChannels()
-    channels.value = res.data.channels
+    channels.value = res.data.items
   } finally {
     loading.value = false
   }
@@ -39,7 +39,7 @@ function openCreate() {
 function openEdit(ch: AlertChannel) {
   isEdit.value = true
   editingId.value = ch.id
-  form.value = { name: ch.name, type: ch.type, url: ch.config?.url || '', enabled: ch.enabled }
+  form.value = { name: ch.name, type: ch.type, url: ch.url, enabled: ch.enabled }
   showForm.value = true
 }
 
@@ -51,7 +51,7 @@ async function handleSubmit() {
   const data = {
     name: form.value.name,
     type: form.value.type,
-    config: { url: form.value.url },
+    url: form.value.url,
     enabled: form.value.enabled,
   }
   try {
@@ -69,7 +69,7 @@ async function handleSubmit() {
   }
 }
 
-async function handleDelete(id: number) {
+async function handleDelete(id: string) {
   try {
     await deleteAlertChannel(id)
     message.success('删除成功')
@@ -79,7 +79,7 @@ async function handleDelete(id: number) {
   }
 }
 
-async function handleTest(id: number) {
+async function handleTest(id: string) {
   try {
     await testAlertChannel(id)
     message.success('测试消息已发送')
@@ -89,13 +89,10 @@ async function handleTest(id: number) {
 }
 
 const columns: DataTableColumns<AlertChannel> = [
-  { title: 'ID', key: 'id', width: 60 },
+  { title: 'ID', key: 'id', width: 220, ellipsis: { tooltip: true } },
   { title: '名称', key: 'name', width: 160 },
   { title: '类型', key: 'type', width: 100 },
-  {
-    title: 'URL', key: 'url', width: 300,
-    render: (row) => row.config?.url || '-',
-  },
+  { title: 'URL', key: 'url', width: 300, ellipsis: { tooltip: true } },
   {
     title: '启用', key: 'enabled', width: 70,
     render: (row) => h(NTag, { type: row.enabled ? 'success' : 'default', size: 'small' }, { default: () => row.enabled ? '是' : '否' }),

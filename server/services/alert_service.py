@@ -1,12 +1,15 @@
 """Alert engine service - window-based evaluation with state machine.
 
 States per task: normal -> triggered -> (cooldown) -> normal
-Evaluation: sliding window of last N results, check threshold condition.
+Evaluation rules (per v1.5):
+  - latency > alert_latency_threshold
+  - packet_loss > alert_loss_threshold
+  - continuous_fail >= alert_fail_count
+Uses sliding window (alert_eval_window), trigger/recovery counts, cooldown.
 """
 import logging
-import operator as op
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 from datetime import datetime, timezone
 from threading import Lock
 
@@ -14,111 +17,143 @@ from server.extensions import db
 
 logger = logging.getLogger(__name__)
 
-# Operator map
-OPERATORS = {
-    '>': op.gt,
-    '>=': op.ge,
-    '<': op.lt,
-    '<=': op.le,
-    '==': op.eq,
-    '!=': op.ne,
-}
-
-# Alert state per task_id
-# state: 'normal' | 'triggered'
-_alert_state: dict[int, str] = {}
-# sliding window of metric values per task: task_id -> deque of (timestamp, value)
-_windows: dict[int, deque] = defaultdict(lambda: deque(maxlen=100))
-# Count of consecutive threshold-breaching results: task_id -> int
-_breach_counts: dict[int, int] = defaultdict(int)
-# Count of consecutive OK results (for recovery): task_id -> int
-_ok_counts: dict[int, int] = defaultdict(int)
-# Last alert time (for cooldown): task_id -> timestamp
-_last_alert_time: dict[int, float] = {}
+# Per-task, per-metric state
+# key: (task_id, metric_name) -> 'normal' | 'triggered'
+_alert_state: dict[tuple[str, str], str] = {}
+# Consecutive breach counts: (task_id, metric) -> int
+_breach_counts: dict[tuple[str, str], int] = defaultdict(int)
+# Consecutive OK counts: (task_id, metric) -> int
+_ok_counts: dict[tuple[str, str], int] = defaultdict(int)
+# Last alert time for cooldown: (task_id, metric) -> timestamp
+_last_alert_time: dict[tuple[str, str], float] = {}
+# Continuous fail counter: task_id -> int
+_fail_counts: dict[str, int] = defaultdict(int)
 _lock = Lock()
 
 
-def evaluate_probe_result(task_id: int, metrics: dict):
-    """Evaluate a single probe result against alert rules.
-
-    Called from agent_handler on each probe_result received.
-    Returns: ('triggered', metric, value, threshold, operator) or ('recovered', ...) or None
-    """
-    from server.models.task import ProbeTask
-
-    task = db.session.get(ProbeTask, task_id)
-    if not task or not task.alert_enabled:
-        return None
-
-    alert_metric = task.alert_metric
-    alert_operator = task.alert_operator
-    alert_threshold = task.alert_threshold
-    trigger_count = task.alert_trigger_count
-    recovery_count = task.alert_recovery_count
-    cooldown = task.alert_cooldown_seconds
-
-    if alert_threshold is None or alert_operator not in OPERATORS:
-        return None
-
-    # Extract metric value
-    value = metrics.get(alert_metric)
-    if value is None:
-        return None
-
-    try:
-        value = float(value)
-    except (ValueError, TypeError):
-        return None
-
-    compare = OPERATORS[alert_operator]
-    is_breach = compare(value, alert_threshold)
+def _check_threshold(task_id: str, metric_name: str, value: float,
+                     threshold: float, trigger_count: int,
+                     recovery_count: int, cooldown: int):
+    """Generic threshold check with state machine. Returns event or None."""
+    key = (task_id, metric_name)
+    is_breach = value > threshold
 
     with _lock:
-        state = _alert_state.get(task_id, 'normal')
+        state = _alert_state.get(key, 'normal')
         now = time.time()
 
         if is_breach:
-            _breach_counts[task_id] += 1
-            _ok_counts[task_id] = 0
+            _breach_counts[key] += 1
+            _ok_counts[key] = 0
         else:
-            _ok_counts[task_id] += 1
-            _breach_counts[task_id] = 0
+            _ok_counts[key] += 1
+            _breach_counts[key] = 0
 
         if state == 'normal':
-            if _breach_counts[task_id] >= trigger_count:
-                # Check cooldown
-                last = _last_alert_time.get(task_id, 0)
+            if _breach_counts[key] >= trigger_count:
+                last = _last_alert_time.get(key, 0)
                 if now - last >= cooldown:
-                    _alert_state[task_id] = 'triggered'
-                    _last_alert_time[task_id] = now
-                    _breach_counts[task_id] = 0
-                    return ('triggered', alert_metric, value, alert_threshold, alert_operator)
+                    _alert_state[key] = 'triggered'
+                    _last_alert_time[key] = now
+                    _breach_counts[key] = 0
+                    return 'triggered'
 
         elif state == 'triggered':
-            if _ok_counts[task_id] >= recovery_count:
-                _alert_state[task_id] = 'normal'
-                _ok_counts[task_id] = 0
-                return ('recovered', alert_metric, value, alert_threshold, alert_operator)
+            if _ok_counts[key] >= recovery_count:
+                _alert_state[key] = 'normal'
+                _ok_counts[key] = 0
+                return 'recovered'
 
     return None
 
 
-def record_alert_event(task_id: int, event_type: str, metric: str,
-                       actual_value: float, threshold: float, alert_operator: str):
+def evaluate_probe_result(task_id: str, metrics: dict):
+    """Evaluate a single probe result against all configured alert rules.
+
+    Returns list of (event_type, metric_name, actual_value, threshold) tuples.
+    """
+    from server.models.task import ProbeTask
+
+    task = db.session.get(ProbeTask, task_id)
+    if not task:
+        return []
+
+    # Check if any alert threshold is configured
+    has_alert = (task.alert_latency_threshold is not None
+                 or task.alert_loss_threshold is not None
+                 or task.alert_fail_count is not None)
+    if not has_alert:
+        return []
+
+    trigger_count = task.alert_trigger_count
+    recovery_count = task.alert_recovery_count
+    cooldown = task.alert_cooldown_seconds
+    events = []
+
+    # Rule 1: latency
+    if task.alert_latency_threshold is not None:
+        latency = metrics.get('latency')
+        if latency is not None:
+            try:
+                latency = float(latency)
+                event = _check_threshold(
+                    task_id, 'latency', latency,
+                    task.alert_latency_threshold,
+                    trigger_count, recovery_count, cooldown)
+                if event:
+                    events.append((event, 'latency', latency, task.alert_latency_threshold))
+            except (ValueError, TypeError):
+                pass
+
+    # Rule 2: packet_loss
+    if task.alert_loss_threshold is not None:
+        loss = metrics.get('packet_loss')
+        if loss is not None:
+            try:
+                loss = float(loss)
+                event = _check_threshold(
+                    task_id, 'packet_loss', loss,
+                    task.alert_loss_threshold,
+                    trigger_count, recovery_count, cooldown)
+                if event:
+                    events.append((event, 'packet_loss', loss, task.alert_loss_threshold))
+            except (ValueError, TypeError):
+                pass
+
+    # Rule 3: continuous_fail
+    if task.alert_fail_count is not None:
+        success = metrics.get('success', True)
+        with _lock:
+            if not success:
+                _fail_counts[task_id] += 1
+            else:
+                _fail_counts[task_id] = 0
+
+            fail_val = float(_fail_counts[task_id])
+
+        event = _check_threshold(
+            task_id, 'continuous_fail', fail_val,
+            float(task.alert_fail_count),
+            trigger_count, recovery_count, cooldown)
+        if event:
+            events.append((event, 'continuous_fail', fail_val, float(task.alert_fail_count)))
+
+    return events
+
+
+def record_alert_event(task_id: str, event_type: str, metric: str,
+                       actual_value: float, threshold: float):
     """Record an alert event to alert_history and send webhook notifications."""
     from server.models.alert import AlertHistory, AlertChannel
     from server.utils.webhook import send_webhook
 
-    # Record history
     history = AlertHistory(
         task_id=task_id,
         event_type=event_type,
         metric=metric,
         actual_value=actual_value,
         threshold=threshold,
-        operator=alert_operator,
         notified=False,
-        created_at=datetime.now(timezone.utc),
     )
     db.session.add(history)
     db.session.commit()
@@ -128,15 +163,7 @@ def record_alert_event(task_id: int, event_type: str, metric: str,
     notified = False
     for channel in channels:
         if channel.type == 'webhook':
-            url = channel.config_data.get('url') if hasattr(channel, 'config_data') else None
-            if not url:
-                try:
-                    import json
-                    config = json.loads(channel.config) if isinstance(channel.config, str) else channel.config
-                    url = config.get('url')
-                except Exception:
-                    continue
-
+            url = channel.url
             if url:
                 from server.models.task import ProbeTask
                 task = db.session.get(ProbeTask, task_id)
@@ -147,7 +174,6 @@ def record_alert_event(task_id: int, event_type: str, metric: str,
                     'metric': metric,
                     'actual_value': actual_value,
                     'threshold': threshold,
-                    'operator': alert_operator,
                     'timestamp': datetime.now(timezone.utc).isoformat() + 'Z',
                 }
                 try:
@@ -162,16 +188,20 @@ def record_alert_event(task_id: int, event_type: str, metric: str,
 
     # Push to dashboard
     from server.ws.dashboard_handler import push_alert
-    push_alert(task_id, event_type, metric, actual_value)
+    push_alert({
+        'task_id': task_id,
+        'event_type': event_type,
+        'metric': metric,
+        'actual_value': actual_value,
+        'threshold': threshold,
+    })
 
     return history
 
 
-def process_probe_result(task_id: int, metrics: dict):
+def process_probe_result(task_id: str, metrics: dict):
     """Main entry point: evaluate and handle alert for a probe result."""
-    result = evaluate_probe_result(task_id, metrics)
-    if result:
-        event_type, metric, value, threshold, alert_op = result
-        record_alert_event(task_id, event_type, metric, value, threshold, alert_op)
-        return result
-    return None
+    events = evaluate_probe_result(task_id, metrics)
+    for event_type, metric, value, threshold in events:
+        record_alert_event(task_id, event_type, metric, value, threshold)
+    return events

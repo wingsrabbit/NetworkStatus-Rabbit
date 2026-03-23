@@ -21,7 +21,7 @@ def dashboard():
     alert_status_filter = request.args.get('alert_status')
     search_filter = request.args.get('search')
 
-    # Query nodes
+    # Query nodes into a lookup dict
     nodes_query = Node.query
     if status_filter:
         nodes_query = nodes_query.filter_by(status=status_filter)
@@ -34,66 +34,67 @@ def dashboard():
             )
         )
     nodes = nodes_query.order_by(Node.name.asc()).all()
+    node_map = {n.id: n for n in nodes}
 
     # Query tasks
     tasks_query = ProbeTask.query
     if protocol_filter:
         tasks_query = tasks_query.filter_by(protocol=protocol_filter)
+
+    # BUG-B02: search covers task name, node name, target address
     if search_filter:
+        # Get node IDs matching search
+        matching_node_ids = [n.id for n in Node.query.filter(
+            Node.name.ilike(f'%{search_filter}%')
+        ).all()]
         tasks_query = tasks_query.filter(
             db.or_(
                 ProbeTask.name.ilike(f'%{search_filter}%'),
+                ProbeTask.target_address.ilike(f'%{search_filter}%'),
+                ProbeTask.source_node_id.in_(matching_node_ids) if matching_node_ids else db.false(),
             )
         )
 
-    # Sort: alerting tasks first, then by name
     tasks = tasks_query.order_by(ProbeTask.name.asc()).all()
 
-    # Build response
-    node_list = []
-    for n in nodes:
-        caps = n._parse_capabilities()
-        node_list.append({
-            'id': n.id,
-            'name': n.name,
-            'status': n.status,
-            'labels': [n.label_1, n.label_2, n.label_3],
-            'capabilities': caps,
-            'last_seen': n.last_seen.isoformat() + 'Z' if n.last_seen else None,
-        })
-
-    task_list = []
+    # Build cards for frontend
+    cards = []
     for t in tasks:
-        source = db.session.get(Node, t.source_node_id)
+        source = node_map.get(t.source_node_id) or db.session.get(Node, t.source_node_id)
         target_name = t.target_address
         if t.target_type == 'internal' and t.target_node_id:
             target = db.session.get(Node, t.target_node_id)
             target_name = target.name if target else t.target_node_id
 
-        task_list.append({
+        cards.append({
             'task_id': t.id,
-            'name': t.name,
-            'source_node': source.name if source else t.source_node_id,
-            'source_node_id': t.source_node_id,
-            'target': target_name,
+            'task_name': t.name,
             'protocol': t.protocol,
+            'source_node_id': t.source_node_id,
+            'source_node_name': source.name if source else t.source_node_id,
+            'source_node_status': source.status if source else 'offline',
+            'target_address': target_name or '',
+            'target_type': t.target_type,
+            'target_node_id': t.target_node_id,
             'enabled': t.enabled,
-            'latest': None,  # Filled by real-time snapshot
-            'alert_status': 'normal',  # Updated by alert engine
+            'latest': None,
+            'alert_status': 'normal',
         })
+
+    # BUG-B02: Sort alerting tasks first
+    cards.sort(key=lambda c: (0 if c['alert_status'] != 'normal' else 1, c['task_name'] or ''))
 
     online_count = sum(1 for n in nodes if n.status == 'online')
     offline_count = sum(1 for n in nodes if n.status == 'offline')
 
     return jsonify({
-        'nodes': node_list,
-        'tasks': task_list,
+        'cards': cards,
         'summary': {
             'total_nodes': len(nodes),
             'online_nodes': online_count,
             'offline_nodes': offline_count,
             'total_tasks': len(tasks),
-            'alerting_tasks': 0,  # Updated by alert engine
+            'alerting_tasks': 0,
         }
     }), 200
 

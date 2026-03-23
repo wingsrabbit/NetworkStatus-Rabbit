@@ -19,17 +19,15 @@ const loading = ref(false)
 const showCreate = ref(false)
 const showRole = ref(false)
 const createForm = ref({ username: '', password: '', role: 'readonly' })
-const roleForm = ref({ userId: 0, role: '' })
+const roleForm = ref({ userId: '' as string, role: '' })
 
 const roleOptions = [
   { label: '管理员', value: 'admin' },
-  { label: '操作员', value: 'operator' },
   { label: '只读', value: 'readonly' },
 ]
 
 const roleColor: Record<string, string> = {
   admin: 'error',
-  operator: 'warning',
   readonly: 'info',
 }
 
@@ -38,7 +36,7 @@ async function fetchUsers() {
   try {
     const res = await getUsers({ page: page.value, per_page: 20 })
     users.value = res.data.items
-    total.value = res.data.total
+    total.value = res.data.pagination.total
   } finally {
     loading.value = false
   }
@@ -76,7 +74,7 @@ async function handleRoleUpdate() {
   }
 }
 
-async function handleDelete(id: number) {
+async function handleDelete(id: string) {
   try {
     await deleteUser(id)
     message.success('删除成功')
@@ -87,7 +85,7 @@ async function handleDelete(id: number) {
 }
 
 const columns: DataTableColumns<User> = [
-  { title: 'ID', key: 'id', width: 60 },
+  { title: 'ID', key: 'id', width: 220, ellipsis: { tooltip: true } },
   { title: '用户名', key: 'username', width: 160 },
   {
     title: '角色', key: 'role', width: 100,

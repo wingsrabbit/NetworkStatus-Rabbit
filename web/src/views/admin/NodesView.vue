@@ -19,7 +19,8 @@ const showToken = ref(false)
 const showDeploy = ref(false)
 const showEdit = ref(false)
 const newNodeToken = ref('')
-const deployCommand = ref('')
+const deployScriptCommand = ref('')
+const deployDockerCommand = ref('')
 const createForm = ref({ name: '', label_1: '', label_2: '', label_3: '' })
 const editForm = ref<Partial<Node>>({})
 const editingId = ref('')
@@ -29,7 +30,7 @@ async function fetchNodes() {
   try {
     const res = await getNodes({ page: page.value, per_page: 20 })
     nodes.value = res.data.items
-    total.value = res.data.total
+    total.value = res.data.pagination.total
   } finally {
     loading.value = false
   }
@@ -98,7 +99,8 @@ async function handleToggle(node: Node) {
 async function handleDeploy(id: string) {
   try {
     const res = await getDeployCommand(id)
-    deployCommand.value = res.data.command
+    deployScriptCommand.value = res.data.script_command
+    deployDockerCommand.value = res.data.docker_command
     showDeploy.value = true
   } catch (err: any) {
     message.error(err.response?.data?.error?.message || '获取失败')
@@ -194,7 +196,10 @@ onMounted(fetchNodes)
 
     <!-- Deploy Command Modal -->
     <NModal v-model:show="showDeploy" preset="card" title="部署命令" style="width: 600px">
-      <NCode :code="deployCommand" language="bash" word-wrap />
+      <p style="font-weight: bold; margin-bottom: 8px;">脚本安装</p>
+      <NCode :code="deployScriptCommand" language="bash" word-wrap />
+      <p style="font-weight: bold; margin: 16px 0 8px;">Docker 安装</p>
+      <NCode :code="deployDockerCommand" language="bash" word-wrap />
     </NModal>
   </div>
 </template>

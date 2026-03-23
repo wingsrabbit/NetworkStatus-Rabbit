@@ -28,15 +28,15 @@ async function fetchHistory() {
     if (eventFilter.value) params.event_type = eventFilter.value
     const res = await getAlertHistory(params)
     items.value = res.data.items
-    total.value = res.data.total
+    total.value = res.data.pagination.total
   } finally {
     loading.value = false
   }
 }
 
 const columns: DataTableColumns<AlertHistory> = [
-  { title: 'ID', key: 'id', width: 60 },
-  { title: '任务ID', key: 'task_id', width: 80 },
+  { title: 'ID', key: 'id', width: 220, ellipsis: { tooltip: true } },
+  { title: '任务ID', key: 'task_id', width: 220, ellipsis: { tooltip: true } },
   {
     title: '事件', key: 'event_type', width: 80,
     render: (row) => h(NTag, { type: row.event_type === 'triggered' ? 'error' : 'success', size: 'small' }, { default: () => row.event_type === 'triggered' ? '触发' : '恢复' }),
@@ -48,7 +48,7 @@ const columns: DataTableColumns<AlertHistory> = [
   },
   {
     title: '阈值', key: 'threshold', width: 100,
-    render: (row) => `${row.operator} ${row.threshold}`,
+    render: (row) => `${row.threshold}`,
   },
   {
     title: '通知', key: 'notified', width: 70,

@@ -1,7 +1,7 @@
 export interface User {
-  id: number
+  id: string
   username: string
-  role: 'admin' | 'operator' | 'readonly'
+  role: 'admin' | 'readonly'
   created_at: string
   created_by: string | null
 }
@@ -32,12 +32,12 @@ export interface NodeCapabilities {
 }
 
 export interface ProbeTask {
-  id: number
+  id: string
   name: string
   source_node_id: string
   source_node_name?: string
   protocol: 'icmp' | 'tcp' | 'udp' | 'http' | 'dns'
-  target_type: 'node' | 'external'
+  target_type: 'internal' | 'external'
   target_node_id: string | null
   target_address: string
   target_port: number | null
@@ -45,11 +45,9 @@ export interface ProbeTask {
   timeout: number
   enabled: boolean
   created_at: string
-  updated_at: string
-  alert_enabled: boolean
-  alert_metric: string
-  alert_operator: string
-  alert_threshold: number | null
+  alert_latency_threshold: number | null
+  alert_loss_threshold: number | null
+  alert_fail_count: number | null
   alert_eval_window: number
   alert_trigger_count: number
   alert_recovery_count: number
@@ -57,33 +55,32 @@ export interface ProbeTask {
 }
 
 export interface AlertChannel {
-  id: number
+  id: string
   name: string
   type: 'webhook'
-  config: Record<string, any>
+  url: string
   enabled: boolean
   created_at: string
 }
 
 export interface AlertHistory {
-  id: number
-  task_id: number
+  id: string
+  task_id: string
   task_name?: string
   event_type: 'triggered' | 'recovered'
   metric: string
   actual_value: number
   threshold: number
-  operator: string
   notified: boolean
   created_at: string
 }
 
 export interface ProbeResult {
-  time: string
+  timestamp: string
   latency: number | null
   packet_loss: number | null
   jitter: number | null
-  status: number
+  success: boolean | null
   dns_time: number | null
   tcp_time: number | null
   tls_time: number | null
@@ -94,7 +91,7 @@ export interface ProbeResult {
 }
 
 export interface DashboardCard {
-  task_id: number
+  task_id: string
   task_name: string
   protocol: string
   source_node_id: string
@@ -107,12 +104,16 @@ export interface DashboardCard {
   alert_status: 'normal' | 'triggered' | null
 }
 
-export interface PaginatedResponse<T> {
-  items: T[]
-  total: number
+export interface Pagination {
   page: number
   per_page: number
-  pages: number
+  total: number
+  total_pages: number
+}
+
+export interface PaginatedResponse<T> {
+  items: T[]
+  pagination: Pagination
 }
 
 export interface ApiError {

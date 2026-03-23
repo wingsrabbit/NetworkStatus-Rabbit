@@ -24,7 +24,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
     }
   }
 
-  function updateCard(taskId: number, data: Partial<DashboardCard>) {
+  function updateCard(taskId: string, data: Partial<DashboardCard>) {
     const idx = cards.value.findIndex((c) => c.task_id === taskId)
     if (idx !== -1) {
       cards.value[idx] = { ...cards.value[idx], ...data }

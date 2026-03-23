@@ -28,19 +28,19 @@ const routes: RouteRecordRaw[] = [
         path: 'nodes',
         name: 'Nodes',
         component: () => import('@/views/admin/NodesView.vue'),
-        meta: { requiresOperator: true },
+        meta: { requiresAdmin: true },
       },
       {
         path: 'tasks',
         name: 'Tasks',
         component: () => import('@/views/admin/TasksView.vue'),
-        meta: { requiresOperator: true },
+        meta: { requiresAdmin: true },
       },
       {
         path: 'alerts/channels',
         name: 'AlertChannels',
         component: () => import('@/views/admin/AlertChannelsView.vue'),
-        meta: { requiresOperator: true },
+        meta: { requiresAdmin: true },
       },
       {
         path: 'alerts/history',
@@ -80,10 +80,6 @@ router.beforeEach(async (to, _from, next) => {
   }
 
   if (to.meta.requiresAdmin && !authStore.isAdmin) {
-    return next('/')
-  }
-
-  if (to.meta.requiresOperator && !authStore.isOperator) {
     return next('/')
   }
 

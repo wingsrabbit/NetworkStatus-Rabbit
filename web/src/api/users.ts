@@ -9,10 +9,10 @@ export function createUser(data: { username: string; password: string; role?: st
   return api.post<{ user: User }>('/users', data)
 }
 
-export function updateUserRole(id: number, role: string) {
+export function updateUserRole(id: string, role: string) {
   return api.put<{ user: User }>(`/users/${id}/role`, { role })
 }
 
-export function deleteUser(id: number) {
+export function deleteUser(id: string) {
   return api.delete(`/users/${id}`)
 }

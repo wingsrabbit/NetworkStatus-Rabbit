@@ -36,6 +36,7 @@ class AgentNamespace(Namespace):
         node_id = _agent_sessions.pop(sid, None)
         if node_id:
             node_service.unregister_connection(node_id)
+            task_service.clear_sync_state(node_id)
             logger.info(f"Agent disconnected: node_id={node_id}")
 
     def on_agent_auth(self, data):
@@ -87,7 +88,7 @@ class AgentNamespace(Namespace):
 
         # Config version sync
         server_version = node.config_version
-        if client_config_version < server_version or client_config_version > server_version:
+        if client_config_version != server_version or task_service.is_desync(node_id):
             if client_config_version > server_version:
                 logger.warning(f"Node {node_id} has higher config_version ({client_config_version}) "
                                f"than server ({server_version}). Forcing full sync.")
@@ -97,22 +98,19 @@ class AgentNamespace(Namespace):
                 'config_version': server_version,
                 'tasks': [t.to_agent_dict() for t in tasks]
             })
+            task_service.mark_sync_pending(node_id, server_version)
         # else: versions match, no sync needed
 
     def on_agent_heartbeat(self, data):
-        """Handle agent heartbeat (1/sec)."""
+        """Handle agent heartbeat (1/sec).
+        Only update in-memory state; last_seen is batch-flushed by background task (BUG-B05).
+        """
         sid = flask_request.sid
         node_id = _agent_sessions.get(sid)
         if not node_id:
             return
 
         node_service.record_heartbeat(node_id, data.get('seq'))
-
-        # Update last_seen
-        node = db.session.get(Node, node_id)
-        if node:
-            node.last_seen = datetime.now(timezone.utc)
-            db.session.commit()
 
     def on_agent_probe_result(self, data):
         """Handle a single probe result."""
@@ -131,16 +129,23 @@ class AgentNamespace(Namespace):
             emit('center:result_ack', {'result_id': result_id})
             return
 
+        # BUG-B03: Verify task belongs to this node
+        if task.source_node_id != node_id:
+            logger.warning(f"Node {node_id} submitted result for task {task_id} owned by {task.source_node_id}")
+            emit('center:result_ack', {'result_id': result_id})
+            return
+
         source_node = db.session.get(Node, task.source_node_id)
         target_name = task.target_address
         if task.target_type == 'internal' and task.target_node_id:
             target_node = db.session.get(Node, task.target_node_id)
             target_name = target_node.name if target_node else task.target_node_id
 
-        # Write to InfluxDB (idempotent - same tags+timestamp = overwrite)
+        # Write to InfluxDB with result_id for dedup
         try:
             influx_service.write_probe_result({
                 'task_id': task_id,
+                'result_id': result_id,
                 'source_node': source_node.name if source_node else node_id,
                 'target': target_name or '',
                 'protocol': data.get('protocol', task.protocol),
@@ -157,15 +162,19 @@ class AgentNamespace(Namespace):
         from server.ws.dashboard_handler import push_task_detail
         push_task_detail(task_id, data)
 
-        # Alert evaluation
-        from server.services.alert_service import process_probe_result
-        try:
-            process_probe_result(task_id, data.get('metrics', {}))
-        except Exception as e:
-            logger.error(f"Alert evaluation failed for task {task_id}: {e}")
+        # BUG-A04: Only evaluate alerts for recent data (within 60s)
+        is_recent = _is_recent_result(data.get('timestamp'))
+        if is_recent:
+            from server.services.alert_service import process_probe_result
+            try:
+                process_probe_result(task_id, data.get('metrics', {}))
+            except Exception as e:
+                logger.error(f"Alert evaluation failed for task {task_id}: {e}")
 
     def on_agent_probe_batch(self, data):
-        """Handle batch probe results (backfill after reconnect)."""
+        """Handle batch probe results (backfill after reconnect).
+        Backfill data is only stored, never triggers alerts (BUG-A04).
+        """
         sid = flask_request.sid
         node_id = _agent_sessions.get(sid)
         if not node_id:
@@ -184,6 +193,11 @@ class AgentNamespace(Namespace):
                 accepted_ids.append(result_id)
                 continue
 
+            # BUG-B03: Verify task belongs to this node
+            if task.source_node_id != node_id:
+                accepted_ids.append(result_id)
+                continue
+
             source_node = db.session.get(Node, task.source_node_id)
             target_name = task.target_address
             if task.target_type == 'internal' and task.target_node_id:
@@ -193,6 +207,7 @@ class AgentNamespace(Namespace):
             try:
                 influx_service.write_probe_result({
                     'task_id': task_id,
+                    'result_id': result_id,
                     'source_node': source_node.name if source_node else node_id,
                     'target': target_name or '',
                     'protocol': result.get('protocol', task.protocol),
@@ -217,7 +232,26 @@ class AgentNamespace(Namespace):
 
         acked_version = data.get('config_version')
         logger.info(f"Node {node_id} acknowledged config_version={acked_version}")
+        task_service.mark_sync_acked(node_id, acked_version)
         _task_ack_pending.pop(node_id, None)
+
+
+def _is_recent_result(timestamp) -> bool:
+    """Check if a probe result timestamp is within 60 seconds of now."""
+    if not timestamp:
+        return True
+    try:
+        if isinstance(timestamp, str):
+            from datetime import datetime, timezone
+            ts = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            delta = (datetime.now(timezone.utc) - ts).total_seconds()
+        elif isinstance(timestamp, (int, float)):
+            delta = time.time() - timestamp
+        else:
+            return True
+        return abs(delta) <= 60
+    except Exception:
+        return True
 
 
 def register_agent_handlers(socketio):

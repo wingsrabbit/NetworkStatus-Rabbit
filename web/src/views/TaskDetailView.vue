@@ -11,7 +11,7 @@ import { useSocket } from '@/composables/useSocket'
 import type { ProbeResult } from '@/types'
 
 const route = useRoute()
-const taskId = Number(route.params.id)
+const taskId = route.params.id as string
 const { subscribeTask, unsubscribeTask, socket } = useSocket()
 
 const chartRef = ref<HTMLDivElement>()
@@ -37,7 +37,7 @@ async function fetchData() {
       getTaskData(taskId, { range: range.value }),
       getTaskStats(taskId, { range: range.value }),
     ])
-    points.value = dataRes.data.points
+    points.value = dataRes.data.data
     stats.value = statsRes.data.stats
     updateChart()
   } finally {
@@ -48,7 +48,7 @@ async function fetchData() {
 function updateChart() {
   if (!chart.value) return
 
-  const times = points.value.map((p) => dayjs(p.time).format('HH:mm:ss'))
+  const times = points.value.map((p) => dayjs(p.timestamp).format('HH:mm:ss'))
   const latencies = points.value.map((p) => p.latency)
   const losses = points.value.map((p) => p.packet_loss)
   const jitters = points.value.map((p) => p.jitter)
@@ -112,9 +112,9 @@ function updateChart() {
 
 function handleRealtimeUpdate(data: any) {
   if (data.task_id !== taskId) return
-  const latest = data.latest as ProbeResult
-  if (!latest) return
-  points.value.push(latest)
+  const result = data.result as ProbeResult
+  if (!result) return
+  points.value.push(result)
   if (points.value.length > 500) points.value.shift()
   updateChart()
 }
@@ -126,12 +126,12 @@ onMounted(() => {
   }
   fetchData()
   subscribeTask(taskId)
-  socket.value?.on('dashboard:task_update', handleRealtimeUpdate)
+  socket.value?.on('dashboard:task_detail', handleRealtimeUpdate)
 })
 
 onUnmounted(() => {
   unsubscribeTask(taskId)
-  socket.value?.off('dashboard:task_update', handleRealtimeUpdate)
+  socket.value?.off('dashboard:task_detail', handleRealtimeUpdate)
   chart.value?.dispose()
 })
 

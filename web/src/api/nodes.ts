@@ -18,5 +18,5 @@ export function deleteNode(id: string) {
 }
 
 export function getDeployCommand(id: string) {
-  return api.get<{ command: string }>(`/nodes/${id}/deploy-command`)
+  return api.get<{ script_command: string; docker_command: string; node_id: string }>(`/nodes/${id}/deploy-command`)
 }

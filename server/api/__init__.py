@@ -15,3 +15,12 @@ def register_blueprints(app):
     app.register_blueprint(users_bp, url_prefix='/api/users')
     app.register_blueprint(alerts_bp, url_prefix='/api/alerts')
     app.register_blueprint(settings_bp, url_prefix='/api/settings')
+
+    # Serve install-agent.sh script
+    import os
+    from flask import send_file
+
+    @app.route('/api/install-agent.sh')
+    def serve_install_script():
+        script_path = os.path.join(app.root_path, '..', 'scripts', 'install-agent.sh')
+        return send_file(script_path, mimetype='text/x-shellscript')

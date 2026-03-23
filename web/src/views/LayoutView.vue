@@ -32,7 +32,7 @@ const menuOptions = computed(() => {
   const items: any[] = [
     { label: '仪表盘', key: '/', icon: renderIcon(HomeOutline) },
   ]
-  if (authStore.isOperator) {
+  if (authStore.isAdmin) {
     items.push(
       { label: '节点管理', key: '/nodes', icon: renderIcon(ServerOutline) },
       { label: '任务管理', key: '/tasks', icon: renderIcon(ListOutline) },

@@ -36,7 +36,7 @@ class InfluxService:
     def write_probe_result(self, result_data):
         """Write a single probe result to InfluxDB raw bucket.
 
-        result_data: dict with keys: task_id, source_node, target, protocol, timestamp, metrics
+        result_data: dict with keys: task_id, result_id, source_node, target, protocol, timestamp, metrics
         """
         metrics = result_data.get('metrics', {})
         point = Point('probe_result') \
@@ -44,6 +44,11 @@ class InfluxService:
             .tag('source_node', result_data.get('source_node', '')) \
             .tag('target', result_data.get('target', '')) \
             .tag('protocol', result_data.get('protocol', ''))
+
+        # Write result_id as a field for dedup traceability
+        result_id = result_data.get('result_id')
+        if result_id:
+            point = point.field('result_id', str(result_id))
 
         # Add fields based on available metrics
         field_map = {
