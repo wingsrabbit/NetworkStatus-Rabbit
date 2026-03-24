@@ -79,15 +79,6 @@ function recalcStats() {
   }
 }
 
-const rangeOptions = [
-  { label: '30 分钟', value: '30m' },
-  { label: '1 小时', value: '1h' },
-  { label: '6 小时', value: '6h' },
-  { label: '24 小时', value: '24h' },
-  { label: '7 天', value: '7d' },
-  { label: '30 天', value: '30d' },
-]
-
 async function fetchData() {
   loading.value = true
   try {
