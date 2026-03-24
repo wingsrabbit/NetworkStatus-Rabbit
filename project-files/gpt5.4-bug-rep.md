@@ -1,346 +1,328 @@
-# NetworkStatus-Rabbit 审查报告（基于当前仓库代码）
+# NetworkStatus-Rabbit Bug Report
 
-审查时间：2026-03-23  
-审查基准：
+任务名称：debug NetworkStatus-Rabbit
 
-1. `project-files/PROJECT.md`
-2. `project-files/prompt.md`
-3. 当前仓库实现
+报告时间：2026-03-24
 
----
-
-## 一、先说结论
-
-### 1. 项目主题没有跑偏
-
-当前仓库仍然是围绕 **网络质量监控** 在实现，没有发现明显偏向 CPU / 内存 / 磁盘 / 系统负载监控的核心功能。主线仍然是：
-
-1. 中心节点 + Agent 架构
-2. 节点间/节点到外部目标的网络探测
-3. InfluxDB 时序存储
-4. Dashboard / Task Detail 展示
-5. WebSocket 实时推送
-6. 告警与补传
-
-也就是说，**主要问题不是“题做偏了”**，而是 **“很多功能已经搭了骨架，但没有严格落到 `PROJECT.md` 定义的契约上”**。
-
-### 2. 已做的验证
-
-已实际执行：
-
-1. `cd /home/runner/work/NetworkStatus-Rabbit/NetworkStatus-Rabbit/web && npm run build` ✅ 通过
-2. `cd /home/runner/work/NetworkStatus-Rabbit/NetworkStatus-Rabbit && python -m compileall server agent manage.py` ✅ 通过
-3. 仓库内未发现成体系的现成测试文件/测试命令
-
-这说明当前代码 **能编译/能前端构建**，但不代表功能已符合规格。
+结论级别：高置信度
 
 ---
 
-## 二、已确认的偏离/BUG（按优先级排序）
+## 1. 问题摘要
 
-## BUG-01：`result_id` 去重没有真正实现，幂等写入失效
+当前线上现象是：
 
-### 证据
+1. Dashboard 卡片页可以正常看到任务最新延迟/丢包数据。
+2. 点击进入任务详情页后，统计卡全部为空，数据点数为 0。
+3. 图表区域没有正常曲线，底部出现 `Invalid Date`。
 
-1. `server/services/influx_service.py:82-89` 中 `check_result_exists()` 直接 `return False`
-2. `server/ws/agent_handler.py:144-159`、`207-224` 写入前没有调用有效的去重检查
-3. `PROJECT.md:747-758` 明确要求中心端写入前检查 `result_id`，重复时跳过写入但仍 ACK
+结合当前仓库代码，问题不是单点故障，而是两处相互叠加的缺陷：
 
-### 影响
+1. Agent 上报的 `timestamp` 格式错误，导致时序数据大概率没有被正确写入 InfluxDB。
+2. 任务详情页消费实时 WebSocket 数据时，前后端消息结构不一致，导致前端拿不到正确的 `latency/packet_loss/jitter` 字段，并把非法时间直接送进图表。
 
-断线补传、网络抖动重发时，同一条结果可能重复写入 InfluxDB。  
-这会直接破坏：
+这两处问题叠加后，就会形成你现在看到的完整症状：
 
-1. 时序数据准确性
-2. 统计值准确性
-3. 告警判断准确性
-
-### 修改意见
-
-1. 在中心端真正实现 `result_id` 幂等检查
-2. 单条上报和批量补传都必须走同一套去重逻辑
-3. 对重复数据应“跳过写入 + 仍返回 ACK”，不要让 Agent 无限重传
+1. Dashboard 正常，因为它主要看的是服务端内存中的最新结果缓存。
+2. Detail 空白，因为它主要依赖 InfluxDB 历史数据查询。
+3. Detail 页面出现 `Invalid Date`，因为实时推送带来的时间字段格式不合法，且消息结构不匹配。
 
 ---
 
-## BUG-02：Dashboard REST 接口没有按规格返回真实总览数据
+## 2. 根因一：Agent 时间戳格式错误
 
-### 证据
+### 2.1 证据
 
-1. `server/api/data.py:69-82` 中每张卡片的 `latest` 被固定写成 `None`
-2. `server/api/data.py:81` 把 `alert_status` 固定写成 `'normal'`
-3. `server/api/data.py:97` 把 `summary.alerting_tasks` 固定写成 `0`
-4. `server/api/data.py:21` 虽然读取了 `alert_status` 查询参数，但后续完全没有使用
-5. `PROJECT.md:1725-1744` 要求 Dashboard 支持 `alert_status` 筛选，并按 `alert_status DESC, name ASC` 排序
-6. `PROJECT.md:2000-2042` 示例响应是 `{ nodes, tasks, summary }`，而当前接口返回 `{ cards, summary }`
+文件：agent/ws_client.py
 
-### 影响
+当前实现：
 
-Dashboard 首屏拿不到真实的：
+```python
+payload = {
+    'result_id': result_id,
+    'task_id': task_id,
+    'timestamp': timestamp.isoformat() + 'Z',
+    'protocol': protocol,
+    'metrics': result.to_dict(),
+}
+```
 
-1. 最新延迟/丢包
-2. 当前告警状态
-3. 告警任务数量
-4. `alert_status` 筛选结果
+而 `timestamp` 的来源在 agent/scheduler.py：
 
-这会让“总览页”失去最核心的监控意义。
+```python
+now = datetime.now(timezone.utc)
+```
 
-### 修改意见
+这里的 `now` 已经是带时区的 UTC 时间。Python 对这种对象调用 `isoformat()`，通常会得到：
 
-1. 后端接口返回值与 `PROJECT.md` 契约统一
-2. 为每个任务补充真实 `latest` 数据
-3. `alert_status` 不能固定为 `normal`
-4. `alert_status` 筛选和默认排序要真正生效
+```text
+2026-03-24T12:34:56.789123+00:00
+```
 
----
+代码又额外拼接了一个 `Z`，结果会变成：
 
-## BUG-03：Dashboard 实时总览链路实际是断的
+```text
+2026-03-24T12:34:56.789123+00:00Z
+```
 
-### 证据
+这不是合法的标准 RFC3339/ISO8601 UTC 表达。
 
-1. `server/app.py:145-169` 每秒推送 `dashboard:probe_snapshot`，但内容是占位值：
-   - `last_latency: None`
-   - `last_packet_loss: None`
-   - `last_success: None`
-   - `status: 'normal'`
-2. `web/src/composables/useSocket.ts` 没有监听 `dashboard:probe_snapshot`
-3. `server/ws/dashboard_handler.py:84-90` 的 `dashboard:task_detail` 只推给订阅了 `task:{task_id}` 房间的用户
-4. `web/src/composables/useSocket.ts:32-37` 却试图在 Dashboard store 里靠 `dashboard:task_detail` 更新卡片
+### 2.2 为什么这会造成“详情页无数据”
 
-### 影响
+服务端接收到 agent 结果后，会在 server/ws/agent_handler.py 中调用：
 
-这会造成两个直接后果：
+```python
+influx_service.write_probe_result({... 'timestamp': data.get('timestamp'), ...})
+```
 
-1. 总览页不会按规格消费“每秒聚合快照”
-2. 总览页也拿不到详情页专用房间推送
+再进入 server/services/influx_service.py：
 
-结果就是：**Dashboard 的实时刷新基本不成立**。
+```python
+if ts:
+    if isinstance(ts, str):
+        point = point.time(ts, WritePrecision.S)
+```
 
-### 修改意见
+如果传入的是 `2026-03-24T12:34:56.789123+00:00Z` 这种非法时间字符串，Influx 写入极大概率失败。
 
-1. 后端 `dashboard:probe_snapshot` 必须推送真实快照，不要推占位值
-2. 前端 Dashboard 必须监听并消费 `dashboard:probe_snapshot`
-3. `dashboard:task_detail` 仅保留给详情页订阅场景，不要再混作总览页实时来源
+而 server/ws/agent_handler.py 对写入异常的处理是：
 
----
+```python
+except Exception as e:
+    logger.error(f"Failed to write probe result: {e}")
+```
 
-## BUG-04：告警算法没有实现“窗口化判断”，`alert_eval_window` 实际未生效
+也就是说：
 
-### 证据
+1. 写入失败不会阻断后续流程。
+2. Dashboard 仍然会继续收到“最新结果缓存”。
+3. 但 Detail 页查询 Influx 历史数据时就是空的。
 
-1. `server/services/alert_service.py:45-65` 使用的是连续 breach / 连续 OK 计数
-2. `server/services/alert_service.py` 中没有真正使用 `alert_eval_window`
-3. 全仓搜索 `alert_eval_window`，除模型/API 读写外，核心告警逻辑没有消费它
-4. `PROJECT.md:484-487`、`12.1` 明确定义的是：
-   - 最近 N 次结果构成窗口
-   - 窗口内 ≥ M 次超阈值才告警
-   - 连续 K 次正常才恢复
+这与线上现象完全吻合：
 
-### 影响
+1. Dashboard 有最新值。
+2. Detail `平均延迟/P95/平均丢包/数据点数` 全空。
+3. 图表也没有历史曲线。
 
-当前实现不是规格要求的窗口化告警，而是“连续次数告警”。  
-这会改变系统行为：
+### 2.3 影响范围
 
-1. 误报/漏报条件与规格不一致
-2. 告警风暴抑制能力不足
-3. UI 上配置的 `alert_eval_window` 形同虚设
-
-### 修改意见
-
-1. 按任务 + 指标维护最近 N 次结果窗口
-2. 用窗口内统计值判断触发
-3. 仅将 `alert_recovery_count` 用于恢复判定
-4. 不要继续把“连续超阈值”当作“窗口化”
+影响所有任务详情页，不区分协议。只要数据写入链路经过这段代码，就会中招。
 
 ---
 
-## BUG-05：告警事件命名与 `PROJECT.md` / 数据模型不一致
+## 3. 根因二：任务详情页实时消息结构不一致
 
-### 证据
+### 3.1 前端期待的数据结构
 
-1. `server/models/alert.py:33` 注释和模型语义是 `alert / recovery`
-2. `PROJECT.md:516-524` 也规定 `alert_history.event_type` 为 `alert` / `recovery`
-3. 但 `server/services/alert_service.py:59, 65, 205-206` 实际产生的是 `triggered` / `recovered`
-4. `web/src/types/index.ts:66-75` 也把 `AlertHistory.event_type` 定义成了 `triggered | recovered`
+文件：web/src/views/TaskDetailView.vue
 
-### 影响
+前端把历史接口返回和实时推送都当成 `ProbeResult` 使用：
 
-这会导致：
+```ts
+const result = data.result as ProbeResult
+points.value.push(result)
+```
 
-1. Alert History 存储值与规格不一致
-2. 前后端类型契约与文档不一致
-3. 后续筛选、统计、告警可视化容易继续串坏
+`ProbeResult` 的定义在 web/src/types/index.ts：
 
-### 修改意见
+```ts
+export interface ProbeResult {
+  timestamp: string
+  latency: number | null
+  packet_loss: number | null
+  jitter: number | null
+  success: boolean | null
+  ...
+}
+```
 
-1. `alert_history.event_type` 统一为 `alert` / `recovery`
-2. WebSocket 推送如果想保留内部状态词，也必须在边界层做统一映射
-3. 前端类型定义、API 文档、数据库值三者必须只保留一套命名
+也就是说，详情页期待的是“扁平结构”：
 
----
+```json
+{
+  "timestamp": "...",
+  "latency": 12.3,
+  "packet_loss": 0,
+  "jitter": 1.2,
+  "success": true
+}
+```
 
-## BUG-06：Dashboard 告警状态字段命名也与规格不一致
+### 3.2 后端实际推送的数据结构
 
-### 证据
+文件：server/ws/dashboard_handler.py
 
-1. `PROJECT.md:1732` 规定 `alert_status` 筛选值为 `normal` / `alerting`
-2. `PROJECT.md:1742` 规定按 `alert_status` 排序
-3. `web/src/types/index.ts:104` 却把 `DashboardCard.alert_status` 定义成 `'normal' | 'triggered' | null`
-4. `web/src/composables/useSocket.ts:47` 用 `triggered`
-5. `web/src/views/DashboardView.vue:97` 也按 `triggered` 判断显示红点
+```python
+def push_task_detail(task_id, result_data):
+    socketio.emit('dashboard_task_detail', {
+        'task_id': task_id,
+        'result': result_data,
+    }, room=room, namespace='/dashboard')
+```
 
-### 影响
+而 `result_data` 来自 server/ws/agent_handler.py：
 
-这说明告警状态在：
+```python
+push_task_detail(task_id, data)
+```
 
-1. 后端接口
-2. WebSocket 推送
-3. 前端类型
-4. 页面显示
+这里传进去的 `data` 是 agent 原始包，结构是：
 
-之间没有统一。
+```json
+{
+  "result_id": "...",
+  "task_id": "...",
+  "timestamp": "2026-03-24T12:34:56.789123+00:00Z",
+  "protocol": "icmp",
+  "metrics": {
+    "latency": 0.2,
+    "packet_loss": 0,
+    "jitter": null,
+    "success": true
+  }
+}
+```
 
-### 修改意见
+注意这里的 `latency/packet_loss/jitter/success` 都在 `metrics` 里面，不在顶层。
 
-1. 面向 Dashboard 的状态枚举统一为 `normal` / `alerting`
-2. 如果内部告警引擎保留别的状态词，必须在输出层统一转换
-3. 同时修复 `alert_status` 筛选与排序逻辑
+### 3.3 为什么这会造成 `Invalid Date` 和图表异常
 
----
+文件：web/src/views/TaskDetailView.vue
 
-## BUG-07：前端路由路径没有严格遵守 `PROJECT.md`
+图表直接读取：
 
-### 证据
+```ts
+const times = points.value.map((p) => dayjs(p.timestamp).format('HH:mm:ss'))
+const latencies = points.value.map((p) => p.latency)
+const losses = points.value.map((p) => p.packet_loss)
+const jitters = points.value.map((p) => p.jitter)
+```
 
-1. `PROJECT.md:1134-1143` 规定前端路径应为：
-   - `/dashboard`
-   - `/dashboard/:taskId`
-   - `/admin/nodes`
-   - `/admin/tasks`
-   - `/admin/alerts`
-   - `/admin/users`
-   - `/admin/settings`
-2. 当前 `web/src/router/index.ts:5-63` 实际使用的是：
-   - `/login`
-   - `/`
-   - `/task/:id`
-   - `/nodes`
-   - `/tasks`
-   - `/alerts/channels`
-   - `/users`
-   - `/settings`
+问题在于：
 
-### 影响
+1. 实时推送里的 `timestamp` 是非法格式 `+00:00Z`，`dayjs()` 解析后会得到 `Invalid Date`。
+2. 实时推送里的 `latency/packet_loss/jitter` 不在顶层，前端读取到的是 `undefined`。
 
-这属于明显的“对外行为偏离规格”：
+所以你截图中的现象正好成立：
 
-1. 文档/实现不一致
-2. prompt 要求“严格按 PROJECT.md 实现”，当前未满足
-3. 后续如果继续按现有路径扩展，偏差会越来越大
-
-### 修改意见
-
-1. 前端路由调整到文档定义的正式路径
-2. 菜单、跳转、详情页入口统一跟随新路径
-3. 若决定保留现状，则必须同步回写 `PROJECT.md` 和 `prompt.md`
-
----
-
-## BUG-08：任务详情页“数据点数”字段对不上，页面会长期显示 `-`
-
-### 证据
-
-1. `server/services/influx_service.py:165-167` 返回统计字段名是 `total_probes`
-2. `web/src/views/TaskDetailView.vue:166` 却读取 `stats.count`
-
-### 影响
-
-详情页统计卡中的“数据点数”无法显示真实值。
-
-### 修改意见
-
-1. 前后端字段统一
-2. 建议直接统一到一个明确名称，例如 `total_probes`
+1. 横轴出现 `Invalid Date`。
+2. 图上没有有效折线。
+3. Detail 页面即使有实时消息，也无法正确展示。
 
 ---
 
-## 三、文档/规格自身也存在的冲突点
+## 4. 为什么 Dashboard 卡片页看起来又是正常的
 
-这些问题不完全属于“代码 bug”，但如果不指出，会继续误导后续 AI/开发者。
+这是因为 Dashboard 和 Detail 走的不是同一条数据链路。
 
-## DOC-01：`prompt.md` 与 `PROJECT.md` 的 Influx measurement 名不一致
+Dashboard 列表页主要依赖：
 
-### 证据
+1. server/ws/agent_handler.py 中的 `_latest_results` 内存缓存。
+2. server/api/data.py 的 `/api/data/dashboard` 返回值。
+3. server/app.py 每秒推送的 `dashboard_probe_snapshot`。
 
-1. `project-files/prompt.md:67` 写的是 `probe_results`
-2. `project-files/PROJECT.md:388` 写的是 `probe_result`
-3. 当前实现 `server/services/influx_service.py:42` 也使用 `probe_result`
+这条链路并不依赖 Influx 查询结果是否成功落盘，也不展示时间轴，所以即使历史写入失败，首页卡片依然能看到“最新延迟”。
 
-### 结论
+Detail 页则不同：
 
-当前代码实际上遵循了 `PROJECT.md`，但 `prompt.md` 会误导实现者。
-
-### 修改意见
-
-1. 把 `prompt.md` 中的 measurement 改成 `probe_result`
-2. 避免以后再产生“文档要求 A、实现要求 B”的次生偏差
+1. 首屏加载调用 `/api/data/task/<task_id>` 和 `/api/data/task/<task_id>/stats`。
+2. 这两个接口都直接查 InfluxDB。
+3. 如果 Influx 没写进去，首屏就是空。
+4. 后续再叠加错误的实时消息结构，就只会出现 `Invalid Date` 和空图。
 
 ---
 
-## DOC-02：规则 9 说“至少保留 1 个启用的 admin”，但用户模型没有“启用/禁用”概念
+## 5. 结论归纳
 
-### 证据
+本次问题的核心根因链如下：
 
-1. `PROJECT.md:1123-1124` 写的是“必须始终保留 ≥ 1 个启用的 admin”
-2. 但 `PROJECT.md:489-499` 的 `users` 表定义里没有 `enabled`
-3. 当前 `server/models/user.py` 也没有 `enabled`
-4. 当前系统也没有“禁用用户”的 API/页面
+1. Agent 生成了非法 UTC 时间字符串：`timestamp.isoformat() + 'Z'`。
+2. 服务端把这个非法时间直接用于 Influx 写入。
+3. 写入失败后仅记日志，不阻断 Dashboard 内存态更新。
+4. 所以首页卡片仍显示“正常运行”。
+5. Detail 页查询 Influx 历史数据时为空，因此统计卡和图表为空。
+6. 同时，Detail 页订阅到的实时消息结构又与前端 `ProbeResult` 类型不一致。
+7. 非法时间继续触发 `Invalid Date`，嵌套 `metrics` 又让折线值变成 `undefined`。
 
-### 结论
-
-这属于 **规格内部不自洽**。  
-当前实现只能做到“至少保留 1 个 admin”，做不到“至少保留 1 个启用的 admin”。
-
-### 修改意见
-
-二选一：
-
-1. **如果确实需要“启用/禁用用户”**：补 `users.enabled`、补 API、补页面、补权限判断  
-2. **如果不需要**：把规则 9 的文案改成“至少保留 1 个 admin”
+所以这不是“前端图表自己坏了”，而是“存储链路 + 实时消息契约”同时有问题。
 
 ---
 
-## 四、建议优先修复顺序
+## 6. 建议修复顺序
 
-建议按下面顺序处理：
+### P0：先修时间戳格式
 
-1. **先修数据正确性**
-   - BUG-01 `result_id` 去重
-   - BUG-02 Dashboard REST 总览数据
-   - BUG-03 Dashboard 实时快照链路
+建议把 agent 侧时间序列化改成合法 UTC 形式，二选一即可：
 
-2. **再修告警契约**
-   - BUG-04 窗口化告警
-   - BUG-05 告警事件命名
-   - BUG-06 Dashboard 告警状态枚举
+方案 A：直接使用 aware datetime 的标准输出，不再拼 `Z`
 
-3. **最后修规格一致性**
-   - BUG-07 前端路由路径
-   - BUG-08 详情页统计字段
-   - DOC-01 / DOC-02 文档冲突
+```python
+'timestamp': timestamp.isoformat(),
+```
+
+方案 B：输出标准 `Z` 结尾格式，但先把 `+00:00` 替换掉
+
+```python
+'timestamp': timestamp.isoformat().replace('+00:00', 'Z'),
+```
+
+这一项不修，Detail 页历史数据会持续为空。
+
+### P0：统一 `dashboard_task_detail` 消息结构
+
+后端推给前端的 `result` 必须改成与 `ProbeResult` 一致的扁平结构，例如：
+
+```json
+{
+  "task_id": "...",
+  "result": {
+    "timestamp": "2026-03-24T12:34:56.789123Z",
+    "latency": 0.2,
+    "packet_loss": 0,
+    "jitter": null,
+    "success": true,
+    "status_code": null,
+    "dns_time": null,
+    "tcp_time": null,
+    "tls_time": null,
+    "ttfb": null,
+    "total_time": null,
+    "resolved_ip": null
+  }
+}
+```
+
+不要再直接把 agent 原始 payload 透传给详情页。
+
+### P1：补一条写入失败的可观测性
+
+当前写 Influx 失败只是记日志，业务层没有任何显式告警。建议至少增加：
+
+1. 写入失败计数。
+2. 最近一次写入错误摘要。
+3. 面板或日志中可快速识别“Dashboard 有数据但 Detail 无历史”的状态。
 
 ---
 
-## 五、最终判断
+## 7. 建议验证步骤
 
-当前仓库：
+修复后建议按以下顺序验证：
 
-1. **没有偏离“网络质量监控平台”这个主题**
-2. **但确实存在多处与 `PROJECT.md` 的明确偏离**
-3. **其中最严重的是：**
-   - 幂等去重未实现
-   - Dashboard 总览/实时链路不成立
-   - 告警算法没有落到窗口化规格
-   - 多处状态/事件命名与文档不统一
+1. 新建一个 ICMP 任务。
+2. 观察 Dashboard 卡片是否继续有实时数据。
+3. 进入 Detail 页面，确认首屏 `数据点数` 大于 0。
+4. 确认 `平均延迟/P95/平均丢包` 正常显示。
+5. 确认图表横轴不再出现 `Invalid Date`。
+6. 再观察 1 到 2 分钟，确认实时曲线持续追加，不再出现空点或 undefined。
 
-如果只看“页面和接口数量”，项目似乎已经很完整；但如果按 `PROJECT.md v1.5` 严格验收，当前实现仍然存在一批会直接影响可用性和一致性的关键问题。
+---
+
+## 8. 本次报告的边界说明
+
+本报告基于以下证据形成：
+
+1. 当前仓库源码静态分析。
+2. 你提供的线上页面截图。
+3. 前后端数据结构和调用链逐段核对。
+
+当前环境的命令策略禁止直接使用 `Invoke-WebRequest`/`curl` 对线上接口做补充抓包，因此没有附上线上 API 原始响应样本；但从代码路径和现象对照来看，以上结论已经足够闭环，且置信度高。

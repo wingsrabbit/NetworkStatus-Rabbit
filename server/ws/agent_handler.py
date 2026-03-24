@@ -193,9 +193,24 @@ class AgentNamespace(Namespace):
         # Update latest result cache for dashboard
         _update_latest_result(task_id, data.get('metrics', {}), data.get('timestamp'))
 
-        # Push to dashboard subscribers
+        # Push to dashboard subscribers — flatten metrics into ProbeResult shape
         from server.ws.dashboard_handler import push_task_detail
-        push_task_detail(task_id, data)
+        metrics = data.get('metrics', {})
+        flat_result = {
+            'timestamp': data.get('timestamp'),
+            'latency': metrics.get('latency'),
+            'packet_loss': metrics.get('packet_loss'),
+            'jitter': metrics.get('jitter'),
+            'success': metrics.get('success'),
+            'status_code': metrics.get('status_code'),
+            'dns_time': metrics.get('dns_time'),
+            'tcp_time': metrics.get('tcp_time'),
+            'tls_time': metrics.get('tls_time'),
+            'ttfb': metrics.get('ttfb'),
+            'total_time': metrics.get('total_time'),
+            'resolved_ip': metrics.get('resolved_ip'),
+        }
+        push_task_detail(task_id, flat_result)
 
         # BUG-A04: Only evaluate alerts for recent data (within 60s)
         is_recent = _is_recent_result(data.get('timestamp'))

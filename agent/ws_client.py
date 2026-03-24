@@ -209,7 +209,7 @@ class WSClient:
         payload = {
             'result_id': result_id,
             'task_id': task_id,
-            'timestamp': timestamp.isoformat() + 'Z',
+            'timestamp': timestamp.isoformat().replace('+00:00', 'Z'),
             'protocol': protocol,
             'metrics': result.to_dict(),
         }

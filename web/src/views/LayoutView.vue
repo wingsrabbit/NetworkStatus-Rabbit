@@ -15,6 +15,9 @@ import { useThemeStore } from '@/stores/theme'
 import { useSocket } from '@/composables/useSocket'
 import { onMounted, onUnmounted } from 'vue'
 
+declare const __APP_VERSION__: string
+const appVersion = __APP_VERSION__
+
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
@@ -85,6 +88,7 @@ function handleUserAction(key: string) {
     >
       <div style="padding: 16px; text-align: center; font-weight: bold; font-size: 16px;">
         🐇 NSR
+        <span style="font-size: 11px; font-weight: normal; opacity: 0.5; margin-left: 4px;">v{{ appVersion }}</span>
       </div>
       <NMenu
         :options="menuOptions"
