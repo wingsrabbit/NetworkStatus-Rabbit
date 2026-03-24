@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { onMounted, ref, h, computed } from 'vue'
+import { onMounted, ref, h, computed, watch } from 'vue'
 import {
   NDataTable, NButton, NSpace, NModal, NForm, NFormItem, NInput,
-  NSelect, NInputNumber, NTag, NPopconfirm, useMessage, NPageHeader
+  NSelect, NInputNumber, NTag, NPopconfirm, NAlert, useMessage, NPageHeader
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { getTasks, createTask, updateTask, deleteTask, toggleTask } from '@/api/tasks'
@@ -59,6 +59,30 @@ const nodeOptions = computed(() =>
 )
 
 const needsPort = computed(() => ['tcp', 'udp'].includes(form.value.protocol || ''))
+
+const protocolWarning = ref<string | null>(null)
+
+watch(
+  [() => form.value.source_node_id, () => form.value.protocol],
+  ([nodeId, protocol]) => {
+    if (!nodeId || !protocol) {
+      protocolWarning.value = null
+      return
+    }
+    const node = nodes.value.find((n) => n.id === nodeId)
+    if (!node || !node.capabilities) {
+      protocolWarning.value = null
+      return
+    }
+    const supported = node.capabilities.protocols || []
+    if (supported.includes(protocol)) {
+      protocolWarning.value = null
+    } else {
+      const reason = node.capabilities.unsupported_reasons?.[protocol] || '不支持'
+      protocolWarning.value = `源节点「${node.name}」不支持 ${protocol.toUpperCase()} 协议：${reason}`
+    }
+  },
+)
 
 const hasAlert = computed(() =>
   form.value.alert_latency_threshold != null ||
@@ -201,6 +225,9 @@ onMounted(fetchData)
         <NFormItem label="协议">
           <NSelect v-model:value="form.protocol" :options="protocolOptions" :disabled="isEdit" />
         </NFormItem>
+        <NAlert v-if="protocolWarning" type="warning" style="margin-bottom: 16px">
+          {{ protocolWarning }}
+        </NAlert>
         <NFormItem label="目标类型">
           <NSelect v-model:value="form.target_type" :options="targetTypeOptions" :disabled="isEdit" />
         </NFormItem>

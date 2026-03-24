@@ -98,6 +98,37 @@ class LocalCache:
         finally:
             conn.close()
 
+    def set_batch_id(self, result_ids, batch_id):
+        """Assign a batch_id to a group of results for backfill tracking."""
+        if not result_ids:
+            return
+        conn = sqlite3.connect(self.db_path)
+        try:
+            placeholders = ','.join('?' for _ in result_ids)
+            conn.execute(
+                f'UPDATE local_results SET batch_id = ? WHERE result_id IN ({placeholders})',
+                [batch_id] + list(result_ids)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def increment_retry_count(self, result_ids):
+        """Increment retry_count for backfill retry tracking."""
+        if not result_ids:
+            return
+        conn = sqlite3.connect(self.db_path)
+        try:
+            placeholders = ','.join('?' for _ in result_ids)
+            conn.execute(
+                f'UPDATE local_results SET retry_count = retry_count + 1 '
+                f'WHERE result_id IN ({placeholders})',
+                list(result_ids)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def cleanup_old_acked(self):
         """Remove acked results older than 3 days."""
         cutoff = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()

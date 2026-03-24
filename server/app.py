@@ -136,6 +136,28 @@ def _start_background_tasks(app):
                             push_node_status(node.id, node.name, new_status)
                             logging.info(f"Node {node.name} status changed: {old_status} -> {new_status}")
 
+                            # Node online/offline notifications per PROJECT 8.1
+                            if new_status == 'offline':
+                                from server.ws.dashboard_handler import push_alert
+                                push_alert({
+                                    'task_id': '',
+                                    'event_type': 'node_offline',
+                                    'metric': 'node_status',
+                                    'actual_value': 0,
+                                    'threshold': 0,
+                                    'message': f'节点 {node.name} 离线',
+                                })
+                            elif new_status == 'online' and old_status == 'offline':
+                                from server.ws.dashboard_handler import push_alert
+                                push_alert({
+                                    'task_id': '',
+                                    'event_type': 'node_online',
+                                    'metric': 'node_status',
+                                    'actual_value': 1,
+                                    'threshold': 0,
+                                    'message': f'节点 {node.name} 恢复上线',
+                                })
+
                     db.session.commit()
                 except Exception as e:
                     logging.error(f"Heartbeat checker error: {e}")
@@ -164,7 +186,7 @@ def _start_background_tasks(app):
                         'timestamp': datetime.now(timezone.utc).isoformat() + 'Z',
                         'tasks': task_data,
                     }
-                    socketio.emit('dashboard_probe_snapshot', snapshot, namespace='/dashboard')
+                    socketio.emit('dashboard:probe_snapshot', snapshot, namespace='/dashboard')
                 except Exception as e:
                     logging.error(f"Snapshot pusher error: {e}")
 
@@ -181,7 +203,7 @@ def _start_background_tasks(app):
                         sid = node_service.get_connection_sid(node_id)
                         if sid:
                             tasks = task_service.get_tasks_for_node(node_id)
-                            socketio.emit('center_task_sync', {
+                            socketio.emit('center:task_sync', {
                                 'config_version': config_version,
                                 'tasks': [t.to_agent_dict() for t in tasks]
                             }, to=sid, namespace='/agent')

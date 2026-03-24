@@ -1,6 +1,10 @@
 import api from './index'
 import type { ProbeTask, PaginatedResponse } from '@/types'
 
+export function getTask(id: string) {
+  return api.get<{ task: ProbeTask }>(`/tasks/${id}`)
+}
+
 export function getTasks(params?: { page?: number; per_page?: number; node_id?: string; protocol?: string }) {
   return api.get<PaginatedResponse<ProbeTask>>('/tasks', { params })
 }

@@ -24,3 +24,19 @@ def register_blueprints(app):
     def serve_install_script():
         script_path = os.path.join(app.root_path, '..', 'scripts', 'install-agent.sh')
         return send_file(script_path, mimetype='text/x-shellscript')
+
+    @app.route('/api/agent-package.tar.gz')
+    def serve_agent_package():
+        """Package and serve agent code as tarball for one-click install."""
+        import tarfile
+        import io
+        agent_dir = os.path.join(app.root_path, '..', 'agent')
+        req_file = os.path.join(app.root_path, '..', 'requirements-agent.txt')
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w:gz') as tar:
+            tar.add(agent_dir, arcname='agent')
+            if os.path.exists(req_file):
+                tar.add(req_file, arcname='requirements-agent.txt')
+        buf.seek(0)
+        return send_file(buf, mimetype='application/gzip',
+                         download_name='agent-package.tar.gz', as_attachment=True)

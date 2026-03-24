@@ -1,11 +1,11 @@
-"""UDP Ping 探测核心 — 基于 socket 的真实 RTT / 丢包 / 抖动测量。
+"""UDP Ping 探测核心 — 基于 Network-Monitoring-Tools/udp_ping 实现。
 
-发送多个 UDP 数据报并测量响应（ICMP 或 UDP 回复），
-计算 RTT、packet_loss、jitter。
-
+参考上游: Network-Monitoring-Tools/udp_ping/ping_udp.py
+上游函数: create_packet(), unpack_packet(), _perform_ping_batch()
 probes/udp_probe.py 作为适配层调用本模块。
 """
 import socket
+import struct
 import time
 import math
 import logging
@@ -14,8 +14,11 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# 探测包负载：16 字节标记
-_PROBE_PAYLOAD = b'NSR-UDP-PROBE\x00\x00\x00'
+# Packet format aligned with upstream create_packet():
+# Header: 4-byte sequence (unsigned int) + 8-byte timestamp (double)
+_HEADER_FORMAT = '!Id'
+_HEADER_SIZE = struct.calcsize(_HEADER_FORMAT)
+_DEFAULT_PAYLOAD_SIZE = 64
 
 
 @dataclass
@@ -28,23 +31,37 @@ class UDPPingResult:
     error: Optional[str] = None
 
 
+def create_packet(seq_num: int, payload_size: int = _DEFAULT_PAYLOAD_SIZE) -> bytes:
+    """Create UDP probe packet with timestamp header.
+
+    Aligned with upstream create_packet(seq_num, payload_size).
+    """
+    header = struct.pack(_HEADER_FORMAT, seq_num, time.time())
+    padding_size = max(0, payload_size - _HEADER_SIZE)
+    return header + b'\x00' * padding_size
+
+
+def unpack_packet(data: bytes):
+    """Extract header from received packet.
+
+    Aligned with upstream unpack_packet(data).
+    Returns: (seq_num, timestamp, payload)
+    """
+    if len(data) < _HEADER_SIZE:
+        return None, None, data
+    seq_num, timestamp = struct.unpack(_HEADER_FORMAT, data[:_HEADER_SIZE])
+    return seq_num, timestamp, data[_HEADER_SIZE:]
+
+
 def ping(target: str, port: int = 53, count: int = 5,
          timeout: int = 10, interval: float = 0.2) -> UDPPingResult:
     """Send count UDP packets and measure RTT / loss / jitter.
 
-    Approach:
-    - Create UDP socket with per-packet timeout
-    - Send probe payload, wait for any response
-    - On ICMP unreachable → socket raises ConnectionRefusedError → port closed but reachable (count as success with RTT)
-    - On actual UDP response → measure RTT normally
-    - On timeout → packet considered lost
-
-    Args:
-        target:   Destination hostname or IP
-        port:     Destination port (default 53 for DNS)
-        count:    Number of packets to send
-        timeout:  Overall timeout in seconds
-        interval: Delay between sends in seconds
+    Aligned with upstream _perform_ping_batch() approach:
+    - Create packets with sequence numbers and timestamps
+    - Send via UDP socket, wait for response or ICMP unreachable
+    - On timeout -> packet considered lost
+    - Calculate RTT, packet_loss, jitter from results
     """
     per_packet_timeout = min(timeout / max(count, 1), 2.0)
 
@@ -53,7 +70,6 @@ def ping(target: str, port: int = 53, count: int = 5,
     received = 0
 
     try:
-        # Resolve hostname once
         addr_info = socket.getaddrinfo(target, port, socket.AF_UNSPEC, socket.SOCK_DGRAM)
         if not addr_info:
             return UDPPingResult(success=False, error=f'Cannot resolve {target}')
@@ -67,8 +83,9 @@ def ping(target: str, port: int = 53, count: int = 5,
             sock = socket.socket(family, socket.SOCK_DGRAM)
             sock.settimeout(per_packet_timeout)
 
+            packet = create_packet(i + 1)
             start = time.perf_counter()
-            sock.sendto(_PROBE_PAYLOAD, sockaddr)
+            sock.sendto(packet, sockaddr)
             try:
                 sock.recvfrom(1024)
                 elapsed = (time.perf_counter() - start) * 1000
@@ -80,7 +97,6 @@ def ping(target: str, port: int = 53, count: int = 5,
                 rtts.append(elapsed)
                 received += 1
             except socket.timeout:
-                # No response — count as lost
                 pass
             finally:
                 sock.close()

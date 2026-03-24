@@ -50,6 +50,7 @@ const routes: RouteRecordRaw[] = [
         path: 'admin/alerts/history',
         name: 'AlertHistory',
         component: () => import('@/views/admin/AlertHistoryView.vue'),
+        meta: { requiresAdmin: true },
       },
       {
         path: 'admin/users',

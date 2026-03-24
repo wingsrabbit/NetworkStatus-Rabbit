@@ -1,6 +1,6 @@
 """Alert engine service - window-based evaluation with state machine.
 
-States per (task_id, metric): normal -> alerting -> normal
+States per (task_id, metric): normal -> alerting -> recovering -> normal
 Evaluation (PROJECT.md §12.1):
   - Sliding window of last N results per (task_id, metric)
   - Trigger: window has >= M breaches
@@ -21,12 +21,14 @@ logger = logging.getLogger(__name__)
 
 # Sliding window of breach booleans per (task_id, metric)
 _windows: dict[tuple[str, str], deque[bool]] = {}
-# Alert state: 'normal' | 'alerting'
+# Alert state: 'normal' | 'alerting' | 'recovering'
 _alert_state: dict[tuple[str, str], str] = {}
 # Consecutive OK counts for recovery
 _ok_counts: dict[tuple[str, str], int] = defaultdict(int)
 # Last alert time for cooldown
 _last_alert_time: dict[tuple[str, str], float] = {}
+# Alert start time for duration calculation
+_alert_started_at: dict[tuple[str, str], datetime] = {}
 # Continuous fail counter per task
 _fail_counts: dict[str, int] = defaultdict(int)
 _lock = Lock()
@@ -45,7 +47,9 @@ def _check_threshold(task_id: str, metric_name: str, value: float,
                      threshold: float, eval_window: int,
                      trigger_count: int, recovery_count: int,
                      cooldown: int):
-    """Window-based threshold check. Returns 'alert', 'recovery', or None."""
+    """Window-based threshold check. Returns 'alert', 'recovery', or None.
+    State machine: normal -> alerting -> recovering -> normal (PROJECT §8.2)
+    """
     key = (task_id, metric_name)
     is_breach = value > threshold
 
@@ -71,11 +75,20 @@ def _check_threshold(task_id: str, metric_name: str, value: float,
                 if now - last >= cooldown:
                     _alert_state[key] = 'alerting'
                     _last_alert_time[key] = now
+                    _alert_started_at[key] = datetime.now(timezone.utc)
                     _ok_counts[key] = 0
                     return 'alert'
 
         elif state == 'alerting':
-            if _ok_counts[key] >= recovery_count:
+            if not is_breach:
+                _alert_state[key] = 'recovering'
+
+        elif state == 'recovering':
+            if is_breach:
+                # Relapse — back to alerting
+                _alert_state[key] = 'alerting'
+                _ok_counts[key] = 0
+            elif _ok_counts[key] >= recovery_count:
                 _alert_state[key] = 'normal'
                 _ok_counts[key] = 0
                 return 'recovery'
@@ -163,6 +176,29 @@ def record_alert_event(task_id: str, event_type: str, metric: str,
     """Record an alert event to alert_history and send webhook notifications."""
     from server.models.alert import AlertHistory, AlertChannel
     from server.utils.webhook import send_webhook
+    from server.models.task import ProbeTask
+
+    task = db.session.get(ProbeTask, task_id)
+    task_name = task.name if task else str(task_id)
+
+    key = (task_id, metric)
+    started_at = None
+    duration = None
+    msg = ''
+
+    if event_type == 'alert':
+        with _lock:
+            started_at = _alert_started_at.get(key)
+        msg = f'任务 {task_name} 的 {metric} 指标触发告警：当前值 {actual_value}，阈值 {threshold}'
+    elif event_type == 'recovery':
+        with _lock:
+            started_at = _alert_started_at.pop(key, None)
+        now = datetime.now(timezone.utc)
+        if started_at:
+            duration = int((now - started_at).total_seconds())
+        msg = f'任务 {task_name} 的 {metric} 指标恢复正常'
+        if duration is not None:
+            msg += f'，持续 {duration} 秒'
 
     history = AlertHistory(
         task_id=task_id,
@@ -170,6 +206,9 @@ def record_alert_event(task_id: str, event_type: str, metric: str,
         metric=metric,
         actual_value=actual_value,
         threshold=threshold,
+        message=msg,
+        alert_started_at=started_at,
+        duration_seconds=duration,
         notified=False,
     )
     db.session.add(history)
@@ -182,15 +221,16 @@ def record_alert_event(task_id: str, event_type: str, metric: str,
         if channel.type == 'webhook':
             url = channel.url
             if url:
-                from server.models.task import ProbeTask
-                task = db.session.get(ProbeTask, task_id)
                 payload = {
                     'event': event_type,
                     'task_id': task_id,
-                    'task_name': task.name if task else str(task_id),
+                    'task_name': task_name,
                     'metric': metric,
                     'actual_value': actual_value,
                     'threshold': threshold,
+                    'message': msg,
+                    'alert_started_at': started_at.isoformat() + 'Z' if started_at else None,
+                    'duration_seconds': duration,
                     'timestamp': datetime.now(timezone.utc).isoformat() + 'Z',
                 }
                 try:

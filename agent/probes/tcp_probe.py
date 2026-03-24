@@ -1,4 +1,6 @@
-"""TCP Ping probe plugin — adapter wrapping network_tools.tcp_ping (Project 11.4)."""
+"""TCP Ping probe plugin — adapter wrapping network_tools.tcp_ping (Project 11.4).
+
+探测核心参考上游: Network-Monitoring-Tools/tcp_ping/monitor_tcp_ping.py"""
 import logging
 
 from agent.probes.base import BaseProbe, ProbeResult, register_probe

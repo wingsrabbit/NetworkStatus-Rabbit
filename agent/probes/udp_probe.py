@@ -1,4 +1,5 @@
 """UDP Ping probe plugin — adapter wrapping network_tools.udp_ping (Project 11.4)."""
+import shutil
 import logging
 
 from agent.probes.base import BaseProbe, ProbeResult, register_probe
@@ -13,18 +14,14 @@ class UDPProbe(BaseProbe):
         return 'udp'
 
     def self_test(self) -> bool:
-        """UDP uses Python socket — always available."""
-        try:
-            import socket
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.close()
+        """Check nc (netcat) is available per PROJECT 11.5."""
+        if shutil.which('nc'):
             return True
-        except Exception as e:
-            self._test_error = str(e)
-            return False
+        self._test_error = 'nc (netcat) not installed'
+        return False
 
     def self_test_reason(self):
-        return getattr(self, '_test_error', 'Python socket (SOCK_DGRAM) not available')
+        return getattr(self, '_test_error', 'nc (netcat) not available')
 
     def probe(self, target: str, port: int = None, timeout: int = 10) -> ProbeResult:
         r = udp_ping(target, port=port or 53, count=5, timeout=timeout)

@@ -172,6 +172,28 @@ def task_stats(task_id):
     return jsonify({'stats': stats}), 200
 
 
+@data_bp.route('/task/<task_id>/alerts', methods=['GET'])
+@login_required
+def task_alert_intervals(task_id):
+    """Return alert history for a task within a time range (for markArea)."""
+    task = db.session.get(ProbeTask, task_id)
+    if not task:
+        return not_found('任务不存在')
+
+    time_range = request.args.get('range', '6h')
+    from server.models.alert import AlertHistory
+    from datetime import datetime, timezone, timedelta
+    range_seconds = _parse_range_to_seconds(time_range)
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=range_seconds)
+
+    alerts = AlertHistory.query.filter(
+        AlertHistory.task_id == task_id,
+        AlertHistory.created_at >= cutoff
+    ).order_by(AlertHistory.created_at.asc()).all()
+
+    return jsonify({'alerts': [a.to_dict() for a in alerts]}), 200
+
+
 def _parse_range_to_seconds(time_range: str) -> int:
     if time_range.endswith('m'):
         return int(time_range[:-1]) * 60

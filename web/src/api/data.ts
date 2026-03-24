@@ -1,5 +1,5 @@
 import api from './index'
-import type { DashboardTask, DashboardNode, DashboardSummary, ProbeResult } from '@/types'
+import type { DashboardTask, DashboardNode, DashboardSummary, ProbeResult, AlertHistory } from '@/types'
 
 export function getDashboard(params?: {
   protocol?: string
@@ -17,4 +17,8 @@ export function getTaskData(taskId: string, params?: { range?: string; start?: s
 
 export function getTaskStats(taskId: string, params?: { range?: string }) {
   return api.get<{ stats: Record<string, any> }>(`/data/task/${taskId}/stats`, { params })
+}
+
+export function getTaskAlerts(taskId: string, params?: { range?: string }) {
+  return api.get<{ alerts: AlertHistory[] }>(`/data/task/${taskId}/alerts`, { params })
 }

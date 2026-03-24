@@ -2,7 +2,7 @@
 import { onMounted, ref, h } from 'vue'
 import {
   NDataTable, NButton, NSpace, NModal, NForm, NFormItem, NInput, NTag,
-  NPopconfirm, NCode, useMessage, NPageHeader
+  NPopconfirm, NCode, NTooltip, useMessage, NPageHeader
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { getNodes, createNode, updateNode, deleteNode, getDeployCommand } from '@/api/nodes'
@@ -112,7 +112,16 @@ const columns: DataTableColumns<Node> = [
   { title: '名称', key: 'name', width: 140 },
   {
     title: '状态', key: 'status', width: 80,
-    render: (row) => h(NTag, { type: row.status === 'online' ? 'success' : 'error', size: 'small' }, { default: () => row.status === 'online' ? '在线' : '离线' }),
+    render: (row) => {
+      const map: Record<string, { type: 'success' | 'error' | 'warning' | 'default'; label: string }> = {
+        online: { type: 'success', label: '在线' },
+        offline: { type: 'error', label: '离线' },
+        registered: { type: 'warning', label: '已注册' },
+        disabled: { type: 'default', label: '已禁用' },
+      }
+      const s = map[row.status] || map.offline
+      return h(NTag, { type: s.type, size: 'small' }, { default: () => s.label })
+    },
   },
   {
     title: '启用', key: 'enabled', width: 80,
@@ -123,6 +132,31 @@ const columns: DataTableColumns<Node> = [
   { title: '标签3', key: 'label_3', width: 100 },
   { title: '版本', key: 'agent_version', width: 80 },
   { title: 'IP', key: 'public_ip', width: 130 },
+  {
+    title: '协议支持', key: 'capabilities', width: 220,
+    render: (row) => {
+      const ALL_PROTOCOLS = ['icmp', 'tcp', 'udp', 'http', 'dns']
+      const caps = row.capabilities
+      const supported = caps?.protocols || []
+      const reasons = caps?.unsupported_reasons || {}
+      return h(NSpace, { size: 4 }, {
+        default: () => ALL_PROTOCOLS.map((p) => {
+          const isSupported = supported.includes(p)
+          const tag = h(NTag, {
+            type: isSupported ? 'success' : 'default',
+            size: 'small',
+          }, { default: () => p.toUpperCase() })
+          if (!isSupported && reasons[p]) {
+            return h(NTooltip, null, {
+              trigger: () => tag,
+              default: () => reasons[p],
+            })
+          }
+          return tag
+        }),
+      })
+    },
+  },
   {
     title: '操作', key: 'actions', width: 280,
     render: (row) => h(NSpace, { size: 4 }, {

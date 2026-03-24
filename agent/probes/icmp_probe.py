@@ -1,4 +1,6 @@
-"""ICMP Ping probe plugin — adapter wrapping network_tools.icmp_ping (Project 11.4)."""
+"""ICMP Ping probe plugin — adapter wrapping network_tools.icmp_ping (Project 11.4).
+
+探测核心参考上游: Network-Monitoring-Tools/icmp_ping/monitor_ping.py"""
 import platform
 import subprocess
 import logging

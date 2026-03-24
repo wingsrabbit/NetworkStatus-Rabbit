@@ -34,6 +34,16 @@ def _get_all_settings():
     return settings
 
 
+@settings_bp.route('/public', methods=['GET'])
+def get_public_settings():
+    """Return site_title/site_subtitle without auth (for all visitors)."""
+    settings = _get_all_settings()
+    return jsonify({
+        'site_title': settings.get('site_title', 'NetworkStatus-Rabbit'),
+        'site_subtitle': settings.get('site_subtitle', '网络质量监控平台'),
+    }), 200
+
+
 @settings_bp.route('', methods=['GET'])
 @admin_required
 def get_settings():

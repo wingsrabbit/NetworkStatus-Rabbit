@@ -101,7 +101,7 @@ def test_channel(channel_id):
 # --- History ---
 
 @alerts_bp.route('/history', methods=['GET'])
-@login_required
+@admin_required
 def list_history():
     page = request.args.get('page', 1, type=int)
     per_page = min(request.args.get('per_page', 50, type=int), 100)

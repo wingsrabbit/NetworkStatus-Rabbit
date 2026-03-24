@@ -2,13 +2,15 @@
 import { onMounted, onUnmounted, ref, watch, shallowRef, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import {
-  NCard, NSpace, NSelect, NStatistic, NGrid, NGi, NSpin, NPageHeader, NButton, NTooltip
+  NCard, NSpace, NSelect, NStatistic, NGrid, NGi, NSpin, NPageHeader, NButton, NTooltip,
+  NTable
 } from 'naive-ui'
 import * as echarts from 'echarts'
 import dayjs from 'dayjs'
-import { getTaskData, getTaskStats } from '@/api/data'
+import { getTaskData, getTaskStats, getTaskAlerts } from '@/api/data'
+import { getTask } from '@/api/tasks'
 import { useSocket } from '@/composables/useSocket'
-import type { ProbeResult } from '@/types'
+import type { ProbeResult, AlertHistory, ProbeTask } from '@/types'
 
 const route = useRoute()
 const taskId = route.params.taskId as string
@@ -18,8 +20,12 @@ const chartRef = ref<HTMLDivElement>()
 const chart = shallowRef<echarts.ECharts>()
 const points = ref<ProbeResult[]>([])
 const stats = ref<Record<string, any>>({})
+const alertHistory = ref<AlertHistory[]>([])
+const taskInfo = ref<ProbeTask | null>(null)
 const loading = ref(false)
 const range = ref('30m')
+
+const protocol = computed(() => taskInfo.value?.protocol || 'icmp')
 
 const rangeOptions = [
   { label: '30 分钟', value: '30m' },
@@ -56,8 +62,6 @@ function fmt(val: number | null | undefined): string {
 
 /**
  * 基于最近 N 个 latency 点计算窗口抖动（标准差）。
- * 对每个点 i，取 [i-WINDOW+1, i] 范围内的有效 latency 计算 stdev。
- * 返回与 points 等长的数组，不足窗口大小的位置为 null。
  */
 const JITTER_WINDOW = 10
 
@@ -96,7 +100,6 @@ const dataPointLabel = computed(() => {
   const s = stats.value
   if (s.total_probes == null) return '-'
   if (s.expected_probes != null) {
-    const label = s.bucket_type === 'raw' ? '原始样本' : (s.bucket_type === '1m' ? '分钟桶' : '小时桶')
     return `${s.total_probes} / ${s.expected_probes}`
   }
   return String(s.total_probes)
@@ -117,12 +120,6 @@ function rangeToMs(r: string): number {
   return 30 * 60 * 1000
 }
 
-/**
- * 定时刷新间隔，按 Project 规格对齐：
- * 30m~24h: 秒级 (5s)
- * 3d~7d:   分钟级 (60s)
- * 14d~30d: 每 5 分钟 (300s)
- */
 function refreshInterval(r: string): number {
   if (['30m', '1h', '6h', '24h'].includes(r)) return 5_000
   if (['3d', '7d'].includes(r)) return 60_000
@@ -142,90 +139,88 @@ function stopAutoRefresh() {
   if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null }
 }
 
-/** 图表是否已完成首次初始化 */
 let _chartInitialized = false
+
+/** 将告警历史转为 markArea 数据 */
+function buildMarkAreaData(): any[] {
+  const areas: any[] = []
+  const alerts = alertHistory.value
+  // Pair alert→recovery events by metric, in chronological order
+  const pendingAlerts: Record<string, AlertHistory> = {}
+  for (const ev of alerts) {
+    const key = ev.metric
+    if (ev.event_type === 'alert') {
+      pendingAlerts[key] = ev
+    } else if (ev.event_type === 'recovery') {
+      const startEv = pendingAlerts[key]
+      const startTime = startEv?.created_at || ev.alert_started_at
+      if (startTime) {
+        const durationText = ev.duration_seconds != null ? `${ev.duration_seconds}s` : ''
+        areas.push([
+          {
+            xAxis: new Date(startTime).getTime(),
+            itemStyle: { color: 'rgba(208, 48, 80, 0.12)' },
+            name: `${key} 告警${durationText ? ' (' + durationText + ')' : ''}`,
+          },
+          { xAxis: new Date(ev.created_at).getTime() }
+        ])
+        delete pendingAlerts[key]
+      }
+    }
+  }
+  // Still-active alerts: extend to now
+  for (const [key, ev] of Object.entries(pendingAlerts)) {
+    areas.push([
+      {
+        xAxis: new Date(ev.created_at).getTime(),
+        itemStyle: { color: 'rgba(208, 48, 80, 0.18)' },
+        name: `${key} 告警中`,
+      },
+      { xAxis: Date.now() }
+    ])
+  }
+  return areas
+}
+
+/** DNS 解析 IP 变更记录 */
+const dnsIpChanges = computed(() => {
+  if (protocol.value !== 'dns') return []
+  const changes: { timestamp: string; ip: string }[] = []
+  let lastIp: string | null = null
+  for (const p of points.value) {
+    if (p.resolved_ip && p.resolved_ip !== lastIp) {
+      changes.push({ timestamp: p.timestamp, ip: p.resolved_ip })
+      lastIp = p.resolved_ip
+    }
+  }
+  return changes
+})
 
 async function fetchData() {
   loading.value = true
   try {
-    const [dataRes, statsRes] = await Promise.all([
+    const promises: Promise<any>[] = [
       getTaskData(taskId, { range: range.value }),
       getTaskStats(taskId, { range: range.value }),
-    ])
-    points.value = dataRes.data.data
-    stats.value = statsRes.data.stats
+      getTaskAlerts(taskId, { range: range.value }),
+    ]
+    if (!taskInfo.value) {
+      promises.push(getTask(taskId))
+    }
+    const results = await Promise.all(promises)
+    points.value = results[0].data.data
+    stats.value = results[1].data.stats
+    alertHistory.value = results[2].data.alerts || []
+    if (results[3]) {
+      taskInfo.value = results[3].data.task
+    }
     updateChart()
   } finally {
     loading.value = false
   }
 }
 
-function updateChart() {
-  if (!chart.value) return
-
-  const latencies = points.value.map((p) => [p.timestamp, p.latency])
-  const losses = points.value.map((p) => [p.timestamp, p.packet_loss])
-
-  // jitter：优先使用后端返回值，若全为 null 则回退到前端 10 点窗口计算
-  const backendJitters = points.value.map((p) => p.jitter)
-  const hasBackendJitter = backendJitters.some((v) => v != null)
-  let jitters: [any, number | null][]
-  if (hasBackendJitter) {
-    jitters = points.value.map((p) => [p.timestamp, p.jitter])
-  } else {
-    const windowJitters = computeWindowJitter(points.value)
-    jitters = points.value.map((p, i) => [p.timestamp, windowJitters[i]])
-  }
-
-  const series: any[] = [
-    {
-      name: '延迟 (ms)',
-      type: 'line',
-      data: latencies,
-      smooth: true,
-      showSymbol: false,
-      itemStyle: { color: '#18a058' },
-      areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-        { offset: 0, color: 'rgba(24,160,88,0.3)' },
-        { offset: 1, color: 'rgba(24,160,88,0.02)' },
-      ])},
-    },
-  ]
-
-  const rawLosses = points.value.map((p) => p.packet_loss)
-  const hasLoss = rawLosses.some((v) => v != null && v > 0)
-  if (hasLoss) {
-    series.push({
-      name: '丢包率 (%)',
-      type: 'bar',
-      data: losses,
-      yAxisIndex: 1,
-      itemStyle: { color: '#d03050' },
-      barWidth: 4,
-    })
-  }
-
-  const hasJitter = jitters.some(([, v]) => v != null)
-  if (hasJitter) {
-    series.push({
-      name: '窗口抖动 (ms)',
-      type: 'line',
-      data: jitters,
-      smooth: true,
-      showSymbol: false,
-      lineStyle: { type: 'dashed' },
-      itemStyle: { color: '#f0a020' },
-    })
-  }
-
-  const yAxis: any[] = [
-    { type: 'value', name: 'ms', min: 0 },
-  ]
-  if (hasLoss) {
-    yAxis.push({ type: 'value', name: '%', min: 0, max: 100, splitLine: { show: false } })
-  }
-
-  // 安全尾巴：右边界 = now - tailMargin，避免尚未完成的探测被当作掉点
+function getXAxisConfig() {
   const now = Date.now()
   const windowMs = rangeToMs(range.value)
   const effectiveEnd = now - tailMarginMs.value
@@ -240,37 +235,307 @@ function updateChart() {
     }
   })()
 
-  const tooltipFormat = (() => {
-    switch (range.value) {
-      case '30m': case '1h': case '6h': return 'HH:mm:ss'
-      case '24h': return 'HH:mm'
-      case '3d': case '7d': case '14d': case '30d': return 'MM-DD HH:mm'
-      default: return 'HH:mm:ss'
+  return { effectiveStart, effectiveEnd, xAxisLabelFormat }
+}
+
+function getTooltipFormat(): string {
+  switch (range.value) {
+    case '30m': case '1h': case '6h': return 'HH:mm:ss'
+    case '24h': return 'HH:mm'
+    case '3d': case '7d': case '14d': case '30d': return 'MM-DD HH:mm'
+    default: return 'HH:mm:ss'
+  }
+}
+
+/** 构建通用 tooltip formatter */
+function tooltipFormatter(params: any): string {
+  if (!Array.isArray(params) || !params.length) return ''
+  const tfmt = getTooltipFormat()
+  const time = dayjs(params[0].value[0]).format(tfmt)
+  let html = `${time}<br/>`
+  for (const p of params) {
+    if (p.componentType === 'markArea') continue
+    const name = p.seriesName
+    let unit = ' ms'
+    if (name.includes('%') || name.includes('成功率')) unit = '%'
+    else if (name.includes('状态码')) unit = ''
+    else if (name.includes('IP')) unit = ''
+    const val = p.value[1] != null ? (typeof p.value[1] === 'number' ? Number(p.value[1]).toFixed(2) : p.value[1]) : '-'
+    html += `${p.marker} ${name}: ${val}${unit}<br/>`
+  }
+  return html
+}
+
+/** 根据协议构建 series 和 yAxis */
+function buildProtocolChart() {
+  const markAreaData = buildMarkAreaData()
+  const markArea = markAreaData.length > 0 ? {
+    silent: false,
+    data: markAreaData,
+    label: { show: true, position: 'insideTop', fontSize: 10, color: '#d03050' },
+    emphasis: { label: { show: true } },
+  } : undefined
+
+  const p = protocol.value
+  if (p === 'http') return buildHttpChart(markArea)
+  if (p === 'dns') return buildDnsChart(markArea)
+  if (p === 'tcp') return buildTcpChart(markArea)
+  if (p === 'udp') return buildUdpChart(markArea)
+  return buildIcmpChart(markArea) // icmp or default
+}
+
+function buildIcmpChart(markArea: any) {
+  const latencies = points.value.map((p) => [p.timestamp, p.latency])
+  const losses = points.value.map((p) => [p.timestamp, p.packet_loss])
+
+  const backendJitters = points.value.map((p) => p.jitter)
+  const hasBackendJitter = backendJitters.some((v) => v != null)
+  let jitters: [any, number | null][]
+  if (hasBackendJitter) {
+    jitters = points.value.map((p) => [p.timestamp, p.jitter])
+  } else {
+    const windowJitters = computeWindowJitter(points.value)
+    jitters = points.value.map((p, i) => [p.timestamp, windowJitters[i]])
+  }
+
+  const series: any[] = [{
+    name: '延迟 (ms)',
+    type: 'line',
+    data: latencies,
+    smooth: true,
+    showSymbol: false,
+    itemStyle: { color: '#18a058' },
+    areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+      { offset: 0, color: 'rgba(24,160,88,0.3)' },
+      { offset: 1, color: 'rgba(24,160,88,0.02)' },
+    ])},
+    markArea,
+  }]
+
+  const hasLoss = losses.some(([, v]) => v != null && (v as number) > 0)
+  const hasJitter = jitters.some(([, v]) => v != null)
+  const yAxis: any[] = [{ type: 'value', name: 'ms', min: 0 }]
+
+  if (hasLoss) {
+    series.push({
+      name: '丢包率 (%)',
+      type: 'bar',
+      data: losses,
+      yAxisIndex: 1,
+      itemStyle: { color: '#d03050' },
+      barWidth: 4,
+    })
+    yAxis.push({ type: 'value', name: '%', min: 0, max: 100, splitLine: { show: false } })
+  }
+
+  if (hasJitter) {
+    series.push({
+      name: '抖动 (ms)',
+      type: 'line',
+      data: jitters,
+      smooth: true,
+      showSymbol: false,
+      lineStyle: { type: 'dashed' },
+      itemStyle: { color: '#f0a020' },
+    })
+  }
+
+  return { series, yAxis, rightMargin: hasLoss ? 60 : 30 }
+}
+
+function buildTcpChart(markArea: any) {
+  const latencies = points.value.map((p) => [p.timestamp, p.latency])
+  const successRates = points.value.map((p) => [p.timestamp, p.success === true ? 100 : (p.success === false ? 0 : null)])
+
+  const series: any[] = [{
+    name: '连接延迟 (ms)',
+    type: 'line',
+    data: latencies,
+    smooth: true,
+    showSymbol: false,
+    itemStyle: { color: '#18a058' },
+    areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+      { offset: 0, color: 'rgba(24,160,88,0.3)' },
+      { offset: 1, color: 'rgba(24,160,88,0.02)' },
+    ])},
+    markArea,
+  }]
+
+  const hasSuccess = successRates.some(([, v]) => v != null)
+  const yAxis: any[] = [{ type: 'value', name: 'ms', min: 0 }]
+  if (hasSuccess) {
+    series.push({
+      name: '连接成功率 (%)',
+      type: 'bar',
+      data: successRates,
+      yAxisIndex: 1,
+      itemStyle: { color: (params: any) => params.value[1] >= 100 ? '#18a058' : '#d03050' },
+      barWidth: 4,
+    })
+    yAxis.push({ type: 'value', name: '%', min: 0, max: 100, splitLine: { show: false } })
+  }
+
+  return { series, yAxis, rightMargin: hasSuccess ? 60 : 30 }
+}
+
+function buildUdpChart(markArea: any) {
+  const latencies = points.value.map((p) => [p.timestamp, p.latency])
+  const losses = points.value.map((p) => [p.timestamp, p.packet_loss])
+
+  const series: any[] = [{
+    name: '延迟 (ms)',
+    type: 'line',
+    data: latencies,
+    smooth: true,
+    showSymbol: false,
+    itemStyle: { color: '#18a058' },
+    areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+      { offset: 0, color: 'rgba(24,160,88,0.3)' },
+      { offset: 1, color: 'rgba(24,160,88,0.02)' },
+    ])},
+    markArea,
+  }]
+
+  const hasLoss = losses.some(([, v]) => v != null && (v as number) > 0)
+  const yAxis: any[] = [{ type: 'value', name: 'ms', min: 0 }]
+  if (hasLoss) {
+    series.push({
+      name: '丢包率 (%)',
+      type: 'bar',
+      data: losses,
+      yAxisIndex: 1,
+      itemStyle: { color: '#d03050' },
+      barWidth: 4,
+    })
+    yAxis.push({ type: 'value', name: '%', min: 0, max: 100, splitLine: { show: false } })
+  }
+
+  return { series, yAxis, rightMargin: hasLoss ? 60 : 30 }
+}
+
+function buildHttpChart(markArea: any) {
+  const totalTime = points.value.map((p) => [p.timestamp, p.total_time ?? p.latency])
+  const dnsTime = points.value.map((p) => [p.timestamp, p.dns_time])
+  const tcpTime = points.value.map((p) => [p.timestamp, p.tcp_time])
+  const tlsTime = points.value.map((p) => [p.timestamp, p.tls_time])
+  const ttfb = points.value.map((p) => [p.timestamp, p.ttfb])
+  const statusCodes = points.value.map((p) => [p.timestamp, p.status_code])
+
+  const series: any[] = [{
+    name: '总响应时间 (ms)',
+    type: 'line',
+    data: totalTime,
+    smooth: true,
+    showSymbol: false,
+    itemStyle: { color: '#18a058' },
+    markArea,
+  }]
+
+  // Stacked area for phases
+  const hasPhases = dnsTime.some(([, v]) => v != null) || tcpTime.some(([, v]) => v != null) ||
+    tlsTime.some(([, v]) => v != null) || ttfb.some(([, v]) => v != null)
+  if (hasPhases) {
+    const phaseColors = ['#2080f0', '#f0a020', '#a855f7', '#36cfc9']
+    const phases = [
+      { name: 'DNS (ms)', data: dnsTime, color: phaseColors[0] },
+      { name: 'TCP (ms)', data: tcpTime, color: phaseColors[1] },
+      { name: 'TLS (ms)', data: tlsTime, color: phaseColors[2] },
+      { name: 'TTFB (ms)', data: ttfb, color: phaseColors[3] },
+    ]
+    for (const phase of phases) {
+      if (phase.data.some(([, v]) => v != null)) {
+        series.push({
+          name: phase.name,
+          type: 'line',
+          stack: 'phases',
+          data: phase.data,
+          smooth: true,
+          showSymbol: false,
+          areaStyle: { opacity: 0.4 },
+          itemStyle: { color: phase.color },
+          lineStyle: { width: 1 },
+        })
+      }
     }
-  })()
+  }
+
+  // Status code scatter
+  const hasStatusCodes = statusCodes.some(([, v]) => v != null)
+  const yAxis: any[] = [{ type: 'value', name: 'ms', min: 0 }]
+  if (hasStatusCodes) {
+    series.push({
+      name: 'HTTP 状态码',
+      type: 'scatter',
+      data: statusCodes.filter(([, v]) => v != null),
+      yAxisIndex: 1,
+      symbolSize: 6,
+      itemStyle: {
+        color: (params: any) => {
+          const code = params.value[1]
+          if (code >= 200 && code < 300) return '#18a058'
+          if (code >= 300 && code < 400) return '#2080f0'
+          if (code >= 400 && code < 500) return '#f0a020'
+          return '#d03050'
+        }
+      },
+    })
+    yAxis.push({ type: 'value', name: '状态码', min: 100, max: 600, splitLine: { show: false } })
+  }
+
+  return { series, yAxis, rightMargin: hasStatusCodes ? 60 : 30 }
+}
+
+function buildDnsChart(markArea: any) {
+  const latencies = points.value.map((p) => [p.timestamp, p.latency])
+  const successRates = points.value.map((p) => [p.timestamp, p.success === true ? 100 : (p.success === false ? 0 : null)])
+
+  const series: any[] = [{
+    name: '解析时间 (ms)',
+    type: 'line',
+    data: latencies,
+    smooth: true,
+    showSymbol: false,
+    itemStyle: { color: '#18a058' },
+    areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+      { offset: 0, color: 'rgba(24,160,88,0.3)' },
+      { offset: 1, color: 'rgba(24,160,88,0.02)' },
+    ])},
+    markArea,
+  }]
+
+  const hasSuccess = successRates.some(([, v]) => v != null)
+  const yAxis: any[] = [{ type: 'value', name: 'ms', min: 0 }]
+  if (hasSuccess) {
+    series.push({
+      name: '解析成功率 (%)',
+      type: 'bar',
+      data: successRates,
+      yAxisIndex: 1,
+      itemStyle: { color: (params: any) => params.value[1] >= 100 ? '#18a058' : '#d03050' },
+      barWidth: 4,
+    })
+    yAxis.push({ type: 'value', name: '%', min: 0, max: 100, splitLine: { show: false } })
+  }
+
+  return { series, yAxis, rightMargin: hasSuccess ? 60 : 30 }
+}
+
+function updateChart() {
+  if (!chart.value) return
+
+  const { series, yAxis, rightMargin } = buildProtocolChart()
+  const { effectiveStart, effectiveEnd, xAxisLabelFormat } = getXAxisConfig()
 
   if (isZoomed.value && _chartInitialized) {
-    // 缩放态：只更新数据序列，不覆盖 xAxis 和 dataZoom
     chart.value.setOption({ series })
   } else {
-    // 非缩放态或首次：完整设置
     const option: any = {
       tooltip: {
         trigger: 'axis',
-        formatter: (params: any) => {
-          if (!Array.isArray(params) || !params.length) return ''
-          const time = dayjs(params[0].value[0]).format(tooltipFormat)
-          let html = `${time}<br/>`
-          for (const p of params) {
-            const unit = p.seriesName.includes('%') ? '%' : ' ms'
-            const val = p.value[1] != null ? Number(p.value[1]).toFixed(2) : '-'
-            html += `${p.marker} ${p.seriesName}: ${val}${unit}<br/>`
-          }
-          return html
-        },
+        formatter: tooltipFormatter,
       },
       legend: { bottom: 30 },
-      grid: { left: 60, right: hasLoss ? 60 : 30, top: 30, bottom: 96 },
+      grid: { left: 60, right: rightMargin, top: 30, bottom: 96 },
       xAxis: {
         type: 'time',
         min: effectiveStart,
@@ -288,7 +553,6 @@ function updateChart() {
     chart.value.setOption(option, true)
     _chartInitialized = true
 
-    // 监听 dataZoom 事件以追踪缩放状态
     chart.value.off('datazoom')
     chart.value.on('datazoom', () => {
       const opt = chart.value?.getOption() as any
@@ -304,13 +568,11 @@ function updateChart() {
   }
 }
 
-/** 重置图表缩放到基础视图 */
 function resetZoom() {
   if (!chart.value) return
   isZoomed.value = false
   zoomStart.value = 0
   zoomEnd.value = 100
-  // 强制完整刷新图表（含 xAxis 更新）
   _chartInitialized = false
   updateChart()
 }
@@ -319,11 +581,9 @@ function handleRealtimeUpdate(data: any) {
   if (data.task_id !== taskId) return
   const result = data.result as ProbeResult
   if (!result) return
-  // 仅 raw 粒度范围允许实时追加
   if (!isRawRange.value) return
   points.value.push(result)
   if (points.value.length > 500) points.value.shift()
-  // 统计卡由定时 fetchData() 统一更新，此处仅更新图表
   updateChart()
   ;(window as any).__nsr_markDataReceived?.()
 }
@@ -336,13 +596,13 @@ onMounted(() => {
   fetchData()
   startAutoRefresh()
   subscribeTask(taskId)
-  socket.value?.on('dashboard_task_detail', handleRealtimeUpdate)
+  socket.value?.on('dashboard:task_detail', handleRealtimeUpdate)
 })
 
 onUnmounted(() => {
   stopAutoRefresh()
   unsubscribeTask(taskId)
-  socket.value?.off('dashboard_task_detail', handleRealtimeUpdate)
+  socket.value?.off('dashboard:task_detail', handleRealtimeUpdate)
   chart.value?.dispose()
 })
 
@@ -405,6 +665,21 @@ watch(range, () => {
       <NSpin :show="loading">
         <div ref="chartRef" style="width: 100%; height: 430px"></div>
       </NSpin>
+    </NCard>
+
+    <!-- DNS 协议：解析 IP 变更记录 -->
+    <NCard v-if="protocol === 'dns' && dnsIpChanges.length > 0" title="解析 IP 变更记录" style="margin-top: 16px">
+      <NTable :bordered="false" :single-line="false" size="small">
+        <thead>
+          <tr><th>时间</th><th>解析 IP</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="(change, i) in dnsIpChanges" :key="i">
+            <td>{{ dayjs(change.timestamp).format('YYYY-MM-DD HH:mm:ss') }}</td>
+            <td>{{ change.ip }}</td>
+          </tr>
+        </tbody>
+      </NTable>
     </NCard>
   </div>
 </template>

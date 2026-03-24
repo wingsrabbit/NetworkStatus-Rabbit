@@ -1,5 +1,7 @@
 """InfluxDB read/write service."""
 import logging
+import os
+import sqlite3
 import threading
 import time
 from collections import OrderedDict
@@ -10,12 +12,48 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 
 logger = logging.getLogger(__name__)
 
-# In-memory dedup cache: result_id -> insertion_time
-# Evicts entries older than _DEDUP_TTL seconds, capped at _DEDUP_MAX_SIZE
+# In-memory dedup cache (performance optimization layer only)
 _DEDUP_TTL = 600  # 10 minutes
 _DEDUP_MAX_SIZE = 100_000
 _dedup_cache: OrderedDict[str, float] = OrderedDict()
 _dedup_lock = threading.Lock()
+
+# Persistent dedup via SQLite (correctness layer)
+_dedup_db_path: str | None = None
+_dedup_db_lock = threading.Lock()
+
+
+def _init_dedup_db(data_dir: str):
+    """Initialize persistent dedup SQLite database."""
+    global _dedup_db_path
+    os.makedirs(data_dir, exist_ok=True)
+    _dedup_db_path = os.path.join(data_dir, 'dedup.db')
+    conn = sqlite3.connect(_dedup_db_path)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS written_results (
+            result_id TEXT PRIMARY KEY,
+            written_at REAL NOT NULL
+        )
+    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_written_at ON written_results(written_at)')
+    conn.commit()
+    conn.close()
+    # Cleanup old entries (> 7 days)
+    _cleanup_dedup_db()
+
+
+def _cleanup_dedup_db():
+    """Remove dedup entries older than 7 days."""
+    if not _dedup_db_path:
+        return
+    cutoff = time.time() - 7 * 86400
+    with _dedup_db_lock:
+        conn = sqlite3.connect(_dedup_db_path)
+        try:
+            conn.execute('DELETE FROM written_results WHERE written_at < ?', (cutoff,))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 class InfluxService:
@@ -42,6 +80,8 @@ class InfluxService:
         )
         self.write_api = self.client.write_api(write_options=SYNCHRONOUS)
         self.query_api = self.client.query_api()
+        # Initialize persistent dedup database
+        _init_dedup_db(app.config['DATA_DIR'])
 
     def write_probe_result(self, result_data):
         """Write a single probe result to InfluxDB raw bucket.
@@ -90,10 +130,11 @@ class InfluxService:
         self.write_api.write(bucket=self.bucket_raw, record=point)
 
     def check_result_exists(self, result_id, task_id):
-        """Check if a result_id already exists using in-memory dedup cache."""
+        """Check if a result_id already exists using memory cache + persistent SQLite."""
         if not result_id:
             return False
         now = time.time()
+        # Fast path: check memory cache
         with _dedup_lock:
             # Evict expired entries
             while _dedup_cache:
@@ -102,18 +143,47 @@ class InfluxService:
                     _dedup_cache.pop(oldest_key)
                 else:
                     break
-            return result_id in _dedup_cache
+            if result_id in _dedup_cache:
+                return True
+        # Slow path: check persistent SQLite
+        if _dedup_db_path:
+            with _dedup_db_lock:
+                conn = sqlite3.connect(_dedup_db_path)
+                try:
+                    cursor = conn.execute(
+                        'SELECT 1 FROM written_results WHERE result_id = ?', (result_id,))
+                    exists = cursor.fetchone() is not None
+                finally:
+                    conn.close()
+                if exists:
+                    # Backfill memory cache
+                    with _dedup_lock:
+                        _dedup_cache[result_id] = now
+                    return True
+        return False
 
     def mark_result_written(self, result_id):
-        """Mark a result_id as written in the dedup cache."""
+        """Mark a result_id as written in both memory cache and persistent SQLite."""
         if not result_id:
             return
+        now = time.time()
         with _dedup_lock:
-            _dedup_cache[result_id] = time.time()
+            _dedup_cache[result_id] = now
             _dedup_cache.move_to_end(result_id)
             # Cap size
             while len(_dedup_cache) > _DEDUP_MAX_SIZE:
                 _dedup_cache.popitem(last=False)
+        # Persist to SQLite
+        if _dedup_db_path:
+            with _dedup_db_lock:
+                conn = sqlite3.connect(_dedup_db_path)
+                try:
+                    conn.execute(
+                        'INSERT OR IGNORE INTO written_results (result_id, written_at) VALUES (?, ?)',
+                        (result_id, now))
+                    conn.commit()
+                finally:
+                    conn.close()
 
     def query_task_data(self, task_id, time_range='6h'):
         """Query time-series data for a specific task.

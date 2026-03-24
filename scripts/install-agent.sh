@@ -70,8 +70,24 @@ echo "Installing Python dependencies..."
 pip install --quiet --upgrade pip
 pip install --quiet python-socketio[client] psutil
 
-# Download agent code (copy from local or pull from server)
-# For now, create a minimal bootstrap that pulls code
+# Download agent code from center server
+echo "Downloading agent code from center..."
+AGENT_URL="http://${SERVER}:${PORT}/api/agent-package.tar.gz"
+curl -fsSL "${AGENT_URL}" -o /tmp/agent-package.tar.gz
+if [ $? -ne 0 ]; then
+    echo "ERROR: Failed to download agent package from ${AGENT_URL}"
+    exit 1
+fi
+echo "Extracting agent code..."
+tar -xzf /tmp/agent-package.tar.gz -C "${INSTALL_DIR}/"
+rm -f /tmp/agent-package.tar.gz
+
+# Install Python requirements if requirements file exists
+if [ -f "${INSTALL_DIR}/requirements-agent.txt" ]; then
+    pip install --quiet -r "${INSTALL_DIR}/requirements-agent.txt"
+fi
+
+# Create startup script
 cat > "${INSTALL_DIR}/run.sh" << EOFRUN
 #!/usr/bin/env bash
 cd "${INSTALL_DIR}"
@@ -116,9 +132,6 @@ echo ""
 echo "=== Installation Complete ==="
 echo "Agent install dir: ${INSTALL_DIR}"
 echo "Agent data dir: ${DATA_DIR}"
-echo ""
-echo "NOTE: You need to copy the agent Python code to ${INSTALL_DIR}/"
-echo "  Or use Docker: docker run with Dockerfile.agent"
 echo ""
 echo "Start: sudo systemctl start ${SERVICE_NAME}"
 echo "Status: sudo systemctl status ${SERVICE_NAME}"

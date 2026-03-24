@@ -13,7 +13,7 @@ export interface Node {
   label_1: string
   label_2: string
   label_3: string
-  status: 'online' | 'offline'
+  status: 'registered' | 'online' | 'offline' | 'disabled'
   last_seen: string | null
   created_at: string
   enabled: boolean
@@ -71,6 +71,9 @@ export interface AlertHistory {
   metric: string
   actual_value: number
   threshold: number
+  message: string | null
+  alert_started_at: string | null
+  duration_seconds: number | null
   notified: boolean
   created_at: string
 }

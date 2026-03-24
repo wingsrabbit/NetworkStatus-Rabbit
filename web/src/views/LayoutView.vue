@@ -13,6 +13,7 @@ import {
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
 import { useSocket } from '@/composables/useSocket'
+import { getPublicSettings } from '@/api/settings'
 import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
 import timezone from 'dayjs/plugin/timezone'
@@ -28,6 +29,24 @@ const route = useRoute()
 const authStore = useAuthStore()
 const themeStore = useThemeStore()
 const { connect, disconnect } = useSocket()
+
+// Site title / subtitle from system settings
+const siteTitle = ref('NSR')
+const siteSubtitle = ref('')
+
+async function loadSiteSettings() {
+  try {
+    const res = await getPublicSettings()
+    siteTitle.value = res.data.site_title || 'NSR'
+    siteSubtitle.value = res.data.site_subtitle || ''
+    document.title = res.data.site_title || 'NetworkStatus-Rabbit'
+  } catch {
+    // Use defaults
+  }
+}
+
+// Expose for SettingsView to call after save
+;(window as any).__nsr_refreshSiteSettings = loadSiteSettings
 
 // Footer status bar
 const currentTime = ref(dayjs().tz('Asia/Shanghai').format('YY/MM/DD HH:mm:ss'))
@@ -54,6 +73,7 @@ function markDataReceived() {
 
 onMounted(() => {
   connect()
+  loadSiteSettings()
   _footerTimer = setInterval(tickFooter, 1000)
 })
 onUnmounted(() => {
@@ -74,11 +94,9 @@ const menuOptions = computed(() => {
       { label: '节点管理', key: '/admin/nodes', icon: renderIcon(ServerOutline) },
       { label: '任务管理', key: '/admin/tasks', icon: renderIcon(ListOutline) },
       { label: '告警通道', key: '/admin/alerts', icon: renderIcon(NotificationsOutline) },
+      { label: '告警历史', key: '/admin/alerts/history', icon: renderIcon(TimeOutline) },
     )
   }
-  items.push(
-    { label: '告警历史', key: '/admin/alerts/history', icon: renderIcon(TimeOutline) },
-  )
   if (authStore.isAdmin) {
     items.push(
       { label: '用户管理', key: '/admin/users', icon: renderIcon(PeopleOutline) },
@@ -121,8 +139,9 @@ function handleUserAction(key: string) {
       content-style="padding: 8px 0;"
     >
       <div style="padding: 16px; text-align: center; font-weight: bold; font-size: 16px;">
-        🐇 NSR
+        🐇 {{ siteTitle }}
         <span style="font-size: 11px; font-weight: normal; opacity: 0.5; margin-left: 4px;">v{{ appVersion }}</span>
+        <div v-if="siteSubtitle" style="font-size: 11px; font-weight: normal; opacity: 0.5; margin-top: 2px;">{{ siteSubtitle }}</div>
       </div>
       <NMenu
         :options="menuOptions"

@@ -40,6 +40,15 @@ def list_tasks():
     }), 200
 
 
+@tasks_bp.route('/<task_id>', methods=['GET'])
+@login_required
+def get_task(task_id):
+    task = db.session.get(ProbeTask, task_id)
+    if not task:
+        return not_found('任务不存在')
+    return jsonify({'task': task.to_dict()}), 200
+
+
 @tasks_bp.route('', methods=['POST'])
 @admin_required
 def create_task():
@@ -113,8 +122,11 @@ def create_task():
 
     db.session.commit()
 
+    # Drive sync state machine per PROJECT 7.6 / 8.3
+    task_service.mark_sync_pending(source_node_id, new_version)
+
     # Notify agent via WebSocket — failure does not affect DB save
-    sync_ok = _try_notify_agent(source_node_id, 'center_task_assign', task, new_version)
+    sync_ok = _try_notify_agent(source_node_id, 'center:task_assign', task, new_version)
 
     resp = {'task': task.to_dict()}
     if not sync_ok:
@@ -154,8 +166,11 @@ def update_task(task_id):
     new_version = task_service.increment_config_version(task.source_node_id)
     db.session.commit()
 
+    # Drive sync state machine per PROJECT 7.6 / 8.3
+    task_service.mark_sync_pending(task.source_node_id, new_version)
+
     # Notify agent via WebSocket — failure does not affect DB save
-    sync_ok = _try_notify_agent(task.source_node_id, 'center_task_update', task, new_version)
+    sync_ok = _try_notify_agent(task.source_node_id, 'center:task_update', task, new_version)
 
     resp = {'task': task.to_dict()}
     if not sync_ok:
@@ -177,6 +192,9 @@ def delete_task(task_id):
     new_version = task_service.increment_config_version(source_node_id)
     db.session.commit()
 
+    # Drive sync state machine per PROJECT 7.6 / 8.3
+    task_service.mark_sync_pending(source_node_id, new_version)
+
     # Notify agent — failure does not affect DB save
     sync_ok = True
     try:
@@ -184,7 +202,7 @@ def delete_task(task_id):
         from server.extensions import socketio
         sid = get_connection_sid(source_node_id)
         if sid:
-            socketio.emit('center_task_remove', {
+            socketio.emit('center:task_remove', {
                 'task_id': task_id_copy,
                 'config_version': new_version
             }, to=sid, namespace='/agent')
@@ -212,8 +230,11 @@ def toggle_task(task_id):
     new_version = task_service.increment_config_version(task.source_node_id)
     db.session.commit()
 
+    # Drive sync state machine per PROJECT 7.6 / 8.3
+    task_service.mark_sync_pending(task.source_node_id, new_version)
+
     # Notify agent via WebSocket — failure does not affect DB save
-    sync_ok = _try_notify_agent(task.source_node_id, 'center_task_update', task, new_version)
+    sync_ok = _try_notify_agent(task.source_node_id, 'center:task_update', task, new_version)
 
     resp = {
         'task': {
@@ -236,7 +257,7 @@ def _try_notify_agent(node_id, event, task, config_version) -> bool:
         if sid:
             payload = task.to_agent_dict()
             payload['config_version'] = config_version
-            if event == 'center_task_update':
+            if event == 'center:task_update':
                 payload['changes'] = payload  # Include all current values
             socketio.emit(event, payload, to=sid, namespace='/agent')
         return True

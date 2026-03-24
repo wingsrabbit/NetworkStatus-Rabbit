@@ -2,6 +2,169 @@
 
 ---
 
+## v0.127 (2026-03-24)
+
+### Bug 修复
+
+#### 问题 15：任务详情页异常区间标记 (markArea)
+- 新增后端接口 `GET /api/data/task/<task_id>/alerts`，返回指定时间范围内的告警历史记录
+- 详情页加载告警历史，将 alert→recovery 事件对转换为 ECharts `markArea` 半透明红色区域
+- 活跃告警（未恢复）自动延伸到当前时间，持续可见
+- 鼠标悬停异常区间可读出指标名称与持续时间
+- 所有协议图表均支持 markArea 叠加
+
+#### 问题 16：协议专属图表分化
+- 新增后端接口 `GET /api/tasks/<task_id>`，返回单个任务详情（含 protocol）
+- 详情页根据任务协议动态切换图表布局：
+  - **ICMP**：延迟折线图 + 丢包率柱状图 + 抖动折线图
+  - **TCP**：连接延迟折线图 + 连接成功率柱状图
+  - **UDP**：延迟折线图 + 丢包率柱状图
+  - **HTTP/HTTPS**：总响应时间折线图 + DNS/TCP/TLS/TTFB 阶段堆叠面积图 + HTTP 状态码散点图（按状态码段着色）
+  - **DNS**：解析时间折线图 + 解析成功率柱状图 + 解析 IP 变更记录表格
+- tooltip 根据协议和指标自动适配单位显示
+- 前端 API 层新增 `getTask()` 和 `getTaskAlerts()` 函数
+
+#### 问题 17：系统设置页面标题/副标题自定义
+- 后端新增 `GET /api/settings/public` 公开接口（无需 admin），返回 `site_title` / `site_subtitle`
+- 系统设置页新增"页面标题"和"页面副标题"输入表单项
+- LayoutView 启动时加载公开设置，动态更新侧边栏品牌区和 `document.title`
+- 管理员保存设置后立即刷新全局标题，无需手动刷新页面
+- 前端 API 层新增 `getPublicSettings()` 函数
+
+### 版本号更新
+- `web/package.json` → 0.127.0
+- `agent/ws_client.py` agent_version → 0.127.0
+
+---
+
+## v0.126 (2026-03-24)
+
+### Bug 修复
+
+#### 问题 1-2：探测核心统一接入 Network-Monitoring-Tools
+
+- **文件**：`agent/network_tools/`（全部 5 个子模块）、`agent/probes/http_probe.py`、`agent/probes/dns_probe.py`、`agent/probes/icmp_probe.py`、`agent/probes/tcp_probe.py`、`agent/probes/udp_probe.py`
+- **问题**：`agent/network_tools/` 中的实现不是来自上游 `Network-Monitoring-Tools`，而是本仓库自写代码占位；HTTP 和 DNS 探测直接在 `probes/` 层调用 `curl/requests/nslookup`，没有走 `network_tools/` 统一架构
+- **修复**：
+  - `network_tools/icmp_ping`、`tcp_ping`、`udp_ping` 添加上游 `Network-Monitoring-Tools` 引用注释，对齐上游解析逻辑
+  - `udp_ping` 改用上游 `create_packet()/unpack_packet()` 的 struct 头格式（`!Id` = 4 字节序号 + 8 字节时间戳）
+  - `network_tools/curl_ping/` **新建完整实现**：基于上游 `monitor_curl.py`，支持 curl `-w` 格式化输出解析 DNS/TCP/TLS/TTFB/总耗时，fallback 到 requests
+  - `network_tools/dns_lookup/` **新建完整实现**：基于上游 `monitor_dns.py`，优先使用 `dig`（与上游一致），fallback 到 `nslookup`
+  - `probes/http_probe.py` 重写为纯适配层，导入 `network_tools.curl_ping`
+  - `probes/dns_probe.py` 重写为纯适配层，导入 `network_tools.dns_lookup`
+  - 五类协议的探测入口全部统一收敛到 `agent/network_tools/`
+
+#### 问题 3：任务同步状态机在 CRUD 变更时正确进入 pending
+
+- **文件**：`server/api/tasks.py`
+- **问题**：`create_task()`、`update_task()`、`delete_task()`、`toggle_task()` 只递增 `config_version`，不调用 `mark_sync_pending()`，导致日常任务变更不驱动同步状态机
+- **修复**：四个 CRUD 端点在 `db.session.commit()` 之后统一调用 `task_service.mark_sync_pending(node_id, new_version)`
+
+#### 问题 4：节点管理页展示协议支持状态
+
+- **文件**：`web/src/views/admin/NodesView.vue`
+- **问题**：节点列表缺少"协议支持"列，管理员看不到各节点 `capabilities` 信息
+- **修复**：
+  - 新增"协议支持"列，按 ICMP/TCP/UDP/HTTP/DNS 渲染 5 个标签
+  - 支持的协议显示绿色 `NTag`，不支持的显示灰色
+  - 不支持的协议鼠标悬停显示 `NTooltip`，展示 `unsupported_reasons` 原因
+  - 导入 `NTooltip` 组件
+
+#### 问题 5：任务创建时协议兼容性检查提示
+
+- **文件**：`web/src/views/admin/TasksView.vue`
+- **问题**：创建任务时不检查源节点是否支持所选协议，管理员无法提前知道任务是否可执行
+- **修复**：
+  - 新增 `protocolWarning` 响应式变量，`watch` 监听 `source_node_id` 和 `protocol` 变化
+  - 当源节点不支持所选协议时，在协议选择下方显示 `NAlert` 警告，展示不支持原因
+  - 警告不阻止创建，仅提供信息提示
+  - 导入 `NAlert` 组件和 `watch`
+
+#### 问题 6+10：WebSocket 事件命名统一为冒号协议
+
+- **文件**：`agent/ws_client.py`、`server/ws/agent_handler.py`、`server/ws/dashboard_handler.py`、`server/app.py`、`server/api/tasks.py`、`web/src/composables/useSocket.ts`、`web/src/views/TaskDetailView.vue`
+- **问题**：Agent-Center 主链路和 Dashboard 订阅链路使用下划线事件名（`agent_auth`、`center_task_sync`、`dashboard_subscribe_task` 等），与 PROJECT 7.1/7.3/7.6/7.8 规定的冒号命名不一致
+- **修复**：
+  - Agent 侧：所有 `emit` 和 `on` 事件名从 `agent_*`/`center_*` 改为 `agent:*`/`center:*`
+  - Server 侧：`AgentNamespace` 和 `DashboardNamespace` 新增 `trigger_event()` 重写，将冒号事件名映射到下划线处理方法
+  - Server 侧：所有 `emit()` 调用改为冒号格式（`center:auth_result`、`center:task_sync`、`dashboard:probe_snapshot` 等）
+  - 前端：`useSocket.ts` 所有事件监听和发送改为冒号格式
+  - 前端：`TaskDetailView.vue` 事件监听改为 `dashboard:task_detail`
+  - 前端：新增 `connect_error` 中 `WS_AUTH_FAILED` 跳转登录页处理
+  - 前端：新增 `error` 事件处理 `WS_AUTH_FAILED`/`WS_TOKEN_EXPIRED` 跳转登录页
+
+#### 问题 7：UDP 能力发现自检改为检查 nc
+
+- **文件**：`agent/probes/udp_probe.py`
+- **问题**：UDP `self_test()` 只检查 Python `socket.AF_INET/SOCK_DGRAM` 是否可创建，不检查 PROJECT 11.5 要求的 `nc` 命令
+- **修复**：`self_test()` 改为 `shutil.which('nc')` 检查 netcat 是否安装，`self_test_reason` 返回 `'nc (netcat) not installed'`
+
+#### 问题 8：安装脚本交付完整 Agent 代码
+
+- **文件**：`scripts/install-agent.sh`、`server/api/__init__.py`
+- **问题**：安装脚本只创建 venv 和启动脚本，不下载 agent 代码，末尾提示"你需要自己把 agent Python code 复制到安装目录"
+- **修复**：
+  - Server 新增 `/api/agent-package.tar.gz` 端点，动态打包 `agent/` 目录和 `requirements-agent.txt` 为 tarball
+  - 安装脚本新增从 center 下载 agent-package.tar.gz 并解压到安装目录的步骤
+  - 安装脚本在解压后自动安装 `requirements-agent.txt` 依赖
+  - 移除末尾 "NOTE: You need to copy..." 提示
+
+#### 问题 9：告警历史接口加上 admin 权限
+
+- **文件**：`server/api/alerts.py`、`web/src/router/index.ts`、`web/src/views/LayoutView.vue`
+- **问题**：`GET /api/alerts/history` 使用 `@login_required` 而非 `@admin_required`，readonly 用户可访问管理区告警历史
+- **修复**：
+  - 后端 `/history` 路由装饰器改为 `@admin_required`
+  - 前端路由 `admin/alerts/history` 添加 `meta: { requiresAdmin: true }`
+  - LayoutView 中"告警历史"菜单移入 admin-only 条件块
+
+#### 问题 11：节点状态机完整落地
+
+- **文件**：`agent/ws_client.py`、`server/app.py`、`web/src/types/index.ts`、`web/src/views/admin/NodesView.vue`
+- **问题**：Agent 断线后本地调度器不停止；心跳检查无节点上下线通知；前端只有 `online|offline` 两态
+- **修复**：
+  - Agent `on_disconnect` 新增 `self.scheduler.stop_all()` 调用，断线后立即停止所有探测任务
+  - Server `heartbeat_checker` 在节点 offline 时通过 `push_alert()` 发送节点离线通知，online 恢复时发送上线通知
+  - 前端 `Node.status` 类型扩展为 `'registered' | 'online' | 'offline' | 'disabled'`
+  - NodesView 状态列支持四态渲染：已注册（黄）、在线（绿）、离线（红）、已禁用（灰）
+
+#### 问题 12：告警状态机补齐 recovering 中间态
+
+- **文件**：`server/services/alert_service.py`、`server/models/alert.py`（字段已存在）、`web/src/types/index.ts`
+- **问题**：告警状态机只有 `normal|alerting` 两态，恢复时直接回 `normal`，无 `recovering` 中间态；`alert_history` 的 `message`、`alert_started_at`、`duration_seconds` 写库时全部为空
+- **修复**：
+  - 状态机扩展为 `normal -> alerting -> recovering -> normal`，recovering 状态下指标恢复正常则计入恢复计数，再次超限则退回 alerting
+  - 新增 `_alert_started_at` 字典，告警触发时记录起始时间
+  - `record_alert_event()` 填充 `message`（中文描述告警/恢复详情）、`alert_started_at`、`duration_seconds`（恢复时计算持续时长）
+  - Webhook payload 增加 `message`、`alert_started_at`、`duration_seconds` 字段
+  - 前端 `AlertHistory` 类型新增 `message`、`alert_started_at`、`duration_seconds` 字段
+
+#### 问题 13：result_id 幂等去重升级为持久检查
+
+- **文件**：`server/services/influx_service.py`
+- **问题**：`check_result_exists()` 仅依赖 10 分钟 TTL 内存 `OrderedDict`，服务重启或长时补传会穿透去重
+- **修复**：
+  - 新增 SQLite 持久去重层（`data/dedup.db`），`written_results` 表记录已写入的 `result_id`
+  - `check_result_exists()` 先查内存缓存（快路径），miss 后查 SQLite（慢路径），命中则回填内存缓存
+  - `mark_result_written()` 同时写入内存缓存和 SQLite
+  - `init_app()` 初始化时创建 dedup 数据库并清理 7 天前的过期条目
+  - 内存缓存保留为性能优化层，SQLite 作为正确性保证层
+
+#### 问题 14：Agent 本地缓存补齐 batch_id 和 retry_count 生命周期
+
+- **文件**：`agent/local_cache.py`、`agent/ws_client.py`
+- **问题**：`local_results` 表有 `batch_id` 和 `retry_count` 列但从未被使用，补传流程无法追踪批次和重试次数
+- **修复**：
+  - `local_cache.py` 新增 `set_batch_id(result_ids, batch_id)` 和 `increment_retry_count(result_ids)` 方法
+  - `ws_client.py` `_backfill()` 在每个 chunk 发送前调用 `set_batch_id()` 关联批次 ID，调用 `increment_retry_count()` 累计重试次数
+
+### 版本号更新
+
+- `web/package.json` version：`0.125.0` → `0.126.0`
+- `agent/ws_client.py` agent_version：`0.125.0` → `0.126.0`
+
+---
+
 ## v0.125 (2026-03-24)
 
 ### Bug 修复

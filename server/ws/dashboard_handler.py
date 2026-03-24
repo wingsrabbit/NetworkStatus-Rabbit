@@ -19,6 +19,16 @@ _dashboard_sessions = {}
 
 class DashboardNamespace(Namespace):
 
+    def trigger_event(self, event, *args):
+        """Map colon-delimited event names to underscore handler methods.
+        e.g. 'dashboard:subscribe_task' -> on_dashboard_subscribe_task()
+        """
+        handler_name = 'on_' + event.replace(':', '_')
+        handler = getattr(self, handler_name, None)
+        if handler:
+            return handler(*args)
+        return super().trigger_event(event, *args)
+
     def on_connect(self):
         sid = flask_request.sid
         # Authenticate via httpOnly Cookie
@@ -84,7 +94,7 @@ class DashboardNamespace(Namespace):
 def push_task_detail(task_id, result_data):
     """Push real-time probe data to subscribers of a specific task."""
     room = f'task:{task_id}'
-    socketio.emit('dashboard_task_detail', {
+    socketio.emit('dashboard:task_detail', {
         'task_id': task_id,
         'result': result_data,
     }, room=room, namespace='/dashboard')
@@ -92,7 +102,7 @@ def push_task_detail(task_id, result_data):
 
 def push_node_status(node_id, node_name, status):
     """Push node status change to all dashboard clients."""
-    socketio.emit('dashboard_node_status', {
+    socketio.emit('dashboard:node_status', {
         'node_id': node_id,
         'name': node_name,
         'status': status,
@@ -101,7 +111,7 @@ def push_node_status(node_id, node_name, status):
 
 def push_alert(alert_data):
     """Push alert notification to all dashboard clients."""
-    socketio.emit('dashboard_alert', alert_data, namespace='/dashboard')
+    socketio.emit('dashboard:alert', alert_data, namespace='/dashboard')
 
 
 def register_dashboard_handlers(socketio_instance):
