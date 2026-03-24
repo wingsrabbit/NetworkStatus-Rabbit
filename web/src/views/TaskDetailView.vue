@@ -39,23 +39,6 @@ function fmt(val: number | null | undefined): string {
   return val.toFixed(2)
 }
 
-/** 根据时间范围选择横轴日期格式 */
-function timeFormat(ts: string): string {
-  switch (range.value) {
-    case '30m':
-    case '1h':
-    case '6h':
-      return dayjs(ts).format('HH:mm:ss')
-    case '24h':
-      return dayjs(ts).format('HH:mm')
-    case '7d':
-      return dayjs(ts).format('MM-DD HH:mm')
-    case '30d':
-      return dayjs(ts).format('MM-DD HH:mm')
-    default:
-      return dayjs(ts).format('HH:mm:ss')
-  }
-}
 
 /** 从当前 points 重算统计值 */
 function recalcStats() {
@@ -79,6 +62,35 @@ function recalcStats() {
   }
 }
 
+/** 将 range 字符串转为毫秒数 */
+function rangeToMs(r: string): number {
+  if (r.endsWith('m')) return parseInt(r) * 60 * 1000
+  if (r.endsWith('h')) return parseInt(r) * 3600 * 1000
+  if (r.endsWith('d')) return parseInt(r) * 86400 * 1000
+  return 30 * 60 * 1000
+}
+
+/** 长周期视图定时刷新间隔（ms）：7d=60s, 30d=300s */
+function refreshInterval(r: string): number | null {
+  if (r === '7d') return 60_000
+  if (r === '30d') return 300_000
+  return null
+}
+
+let _refreshTimer: ReturnType<typeof setInterval> | null = null
+
+function startAutoRefresh() {
+  stopAutoRefresh()
+  const interval = refreshInterval(range.value)
+  if (interval) {
+    _refreshTimer = setInterval(() => fetchData(), interval)
+  }
+}
+
+function stopAutoRefresh() {
+  if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null }
+}
+
 async function fetchData() {
   loading.value = true
   try {
@@ -89,6 +101,8 @@ async function fetchData() {
     points.value = dataRes.data.data
     stats.value = statsRes.data.stats
     updateChart()
+    // 通知全局状态栏收到新数据
+    ;(window as any).__nsr_markDataReceived?.()
   } finally {
     loading.value = false
   }
@@ -97,10 +111,9 @@ async function fetchData() {
 function updateChart() {
   if (!chart.value) return
 
-  const times = points.value.map((p) => timeFormat(p.timestamp))
-  const latencies = points.value.map((p) => p.latency)
-  const losses = points.value.map((p) => p.packet_loss)
-  const jitters = points.value.map((p) => p.jitter)
+  const latencies = points.value.map((p) => [p.timestamp, p.latency])
+  const losses = points.value.map((p) => [p.timestamp, p.packet_loss])
+  const jitters = points.value.map((p) => [p.timestamp, p.jitter])
 
   const series: any[] = [
     {
@@ -117,7 +130,8 @@ function updateChart() {
     },
   ]
 
-  const hasLoss = losses.some((v) => v != null && v > 0)
+  const rawLosses = points.value.map((p) => p.packet_loss)
+  const hasLoss = rawLosses.some((v) => v != null && v > 0)
   if (hasLoss) {
     series.push({
       name: '丢包率 (%)',
@@ -129,7 +143,8 @@ function updateChart() {
     })
   }
 
-  const hasJitter = jitters.some((v) => v != null)
+  const rawJitters = points.value.map((p) => p.jitter)
+  const hasJitter = rawJitters.some((v) => v != null)
   if (hasJitter) {
     series.push({
       name: '抖动 (ms)',
@@ -149,15 +164,32 @@ function updateChart() {
     yAxis.push({ type: 'value', name: '%', min: 0, max: 100, splitLine: { show: false } })
   }
 
+  // 固定时间轴窗口：max = 当前时间, min = 当前时间 - 选定范围
+  const now = Date.now()
+  const windowMs = rangeToMs(range.value)
+
+  const xAxisLabelFormat = (() => {
+    switch (range.value) {
+      case '30m': case '1h': case '6h': return '{HH}:{mm}:{ss}'
+      case '24h': return '{HH}:{mm}'
+      case '7d': case '30d': return '{MM}-{dd} {HH}:{mm}'
+      default: return '{HH}:{mm}:{ss}'
+    }
+  })()
+
   chart.value.setOption({
     tooltip: {
       trigger: 'axis',
       formatter: (params: any) => {
         if (!Array.isArray(params) || !params.length) return ''
-        let html = `${params[0].axisValue}<br/>`
+        const time = dayjs(params[0].value[0]).format(
+          range.value === '30d' || range.value === '7d' ? 'MM-DD HH:mm' :
+          range.value === '24h' ? 'HH:mm' : 'HH:mm:ss'
+        )
+        let html = `${time}<br/>`
         for (const p of params) {
           const unit = p.seriesName.includes('%') ? '%' : ' ms'
-          const val = p.value != null ? Number(p.value).toFixed(2) : '-'
+          const val = p.value[1] != null ? Number(p.value[1]).toFixed(2) : '-'
           html += `${p.marker} ${p.seriesName}: ${val}${unit}<br/>`
         }
         return html
@@ -165,7 +197,13 @@ function updateChart() {
     },
     legend: { bottom: 0 },
     grid: { left: 60, right: hasLoss ? 60 : 30, top: 30, bottom: 40 },
-    xAxis: { type: 'category', data: times, boundaryGap: false },
+    xAxis: {
+      type: 'time',
+      min: now - windowMs,
+      max: now,
+      axisLabel: { formatter: xAxisLabelFormat },
+      boundaryGap: false,
+    },
     yAxis,
     series,
   }, true)
@@ -181,6 +219,7 @@ function handleRealtimeUpdate(data: any) {
   if (points.value.length > 500) points.value.shift()
   recalcStats()
   updateChart()
+  ;(window as any).__nsr_markDataReceived?.()
 }
 
 onMounted(() => {
@@ -189,17 +228,22 @@ onMounted(() => {
     window.addEventListener('resize', () => chart.value?.resize())
   }
   fetchData()
+  startAutoRefresh()
   subscribeTask(taskId)
   socket.value?.on('dashboard_task_detail', handleRealtimeUpdate)
 })
 
 onUnmounted(() => {
+  stopAutoRefresh()
   unsubscribeTask(taskId)
   socket.value?.off('dashboard_task_detail', handleRealtimeUpdate)
   chart.value?.dispose()
 })
 
-watch(range, () => fetchData())
+watch(range, () => {
+  fetchData()
+  startAutoRefresh()
+})
 </script>
 
 <template>

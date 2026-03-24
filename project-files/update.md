@@ -2,6 +2,48 @@
 
 ---
 
+## v0.121 (2026-03-24)
+
+### 新增功能
+
+#### 底部全局状态栏
+
+- **文件**：`web/src/views/LayoutView.vue`
+- **需求**：参考 status.wingsrabbit.com，在全站布局底部居中增加状态栏
+- **实现**：
+  - 显示 `Powered by NetworkStatus-Rabbit · 现在时间（GMT+8）：YY/MM/DD HH:mm:ss · 最后更新：10秒内`
+  - GMT+8 时间每秒刷新
+  - 最后更新基于最近收到数据的时间，<10 秒显示 `10秒内`，否则显示 `N秒前`
+  - 引入 dayjs/plugin/utc + dayjs/plugin/timezone 实现时区转换
+  - 通过 `window.__nsr_markDataReceived()` 全局标记数据到达时间
+
+### Bug 修复
+
+#### 问题 7：7 天 / 30 天页面不会自动更新
+
+- **文件**：`web/src/views/TaskDetailView.vue`
+- **问题**：v0.12 中为 7d/30d 禁用了秒级实时追加，但未补充替代刷新机制，导致长周期视图必须手动切换或刷新才能看到新数据
+- **修复**：新增 `_refreshTimer` 定时刷新 —— 7d 视图每 60 秒自动重拉数据，30d 视图每 300 秒自动重拉数据；切换 range 时自动重置定时器；组件卸载时清理
+
+#### 问题 8：30 分钟~24 小时在历史不足时应保留空白
+
+- **文件**：`web/src/views/TaskDetailView.vue`
+- **问题**：ECharts 使用 `category` 类型横轴，只渲染已有数据点的时间范围，导致 30m/1h/24h 在数据不足时看起来完全相同，时间轴左边界随数据前移让用户误以为"被困在一小段数据里"
+- **修复**：
+  - 将 xAxis 从 `type: 'category'` 改为 `type: 'time'`
+  - 固定时间窗口为 `min = now - rangeMs`，`max = now`
+  - 数据改为 `[timestamp, value]` 二维数组格式
+  - 数据不足的区间自然留白，用户可直观看到数据记录的起始时间
+  - 不同 range 使用不同的 axisLabel 格式（`HH:mm:ss` / `HH:mm` / `MM-dd HH:mm`）
+  - tooltip 也改为从 `value[0]` 读取时间并按 range 格式化
+
+### 版本号更新
+
+- `web/package.json` version：`0.12.0` → `0.121.0`
+- `agent/ws_client.py` agent_version：`0.12.0` → `0.121.0`
+
+---
+
 ## v0.12 (2026-03-24)
 
 ### Bug 修复

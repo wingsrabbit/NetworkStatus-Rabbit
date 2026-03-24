@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { h, computed } from 'vue'
+import { h, computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
-  NLayout, NLayoutSider, NLayoutHeader, NLayoutContent,
+  NLayout, NLayoutSider, NLayoutHeader, NLayoutContent, NLayoutFooter,
   NMenu, NButton, NSpace, NIcon, NSwitch, NAvatar, NDropdown, NText
 } from 'naive-ui'
 import {
@@ -13,7 +13,12 @@ import {
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
 import { useSocket } from '@/composables/useSocket'
-import { onMounted, onUnmounted } from 'vue'
+import dayjs from 'dayjs'
+import utc from 'dayjs/plugin/utc'
+import timezone from 'dayjs/plugin/timezone'
+
+dayjs.extend(utc)
+dayjs.extend(timezone)
 
 declare const __APP_VERSION__: string
 const appVersion = __APP_VERSION__
@@ -24,8 +29,37 @@ const authStore = useAuthStore()
 const themeStore = useThemeStore()
 const { connect, disconnect } = useSocket()
 
-onMounted(() => connect())
-onUnmounted(() => disconnect())
+// Footer status bar
+const currentTime = ref(dayjs().tz('Asia/Shanghai').format('YY/MM/DD HH:mm:ss'))
+const lastUpdateLabel = ref('等待数据')
+let _lastDataTime = 0
+let _footerTimer: ReturnType<typeof setInterval> | null = null
+
+function tickFooter() {
+  currentTime.value = dayjs().tz('Asia/Shanghai').format('YY/MM/DD HH:mm:ss')
+  if (_lastDataTime > 0) {
+    const sec = Math.floor((Date.now() - _lastDataTime) / 1000)
+    lastUpdateLabel.value = sec < 10 ? '10秒内' : `${sec}秒前`
+  }
+}
+
+/** Called from anywhere to mark "we just received fresh data". */
+function markDataReceived() {
+  _lastDataTime = Date.now()
+  lastUpdateLabel.value = '10秒内'
+}
+
+// Expose globally so child views can call it
+;(window as any).__nsr_markDataReceived = markDataReceived
+
+onMounted(() => {
+  connect()
+  _footerTimer = setInterval(tickFooter, 1000)
+})
+onUnmounted(() => {
+  disconnect()
+  if (_footerTimer) clearInterval(_footerTimer)
+})
 
 function renderIcon(icon: any) {
   return () => h(NIcon, null, { default: () => h(icon) })
@@ -117,6 +151,9 @@ function handleUserAction(key: string) {
       <NLayoutContent content-style="padding: 24px;" :native-scrollbar="false">
         <router-view />
       </NLayoutContent>
+      <NLayoutFooter bordered style="height: 36px; display: flex; align-items: center; justify-content: center; font-size: 12px; opacity: 0.6;">
+        Powered by NetworkStatus-Rabbit · 现在时间（GMT+8）：{{ currentTime }} · 最后更新：{{ lastUpdateLabel }}
+      </NLayoutFooter>
     </NLayout>
   </NLayout>
 </template>
