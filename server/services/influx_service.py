@@ -116,8 +116,21 @@ class InfluxService:
                 _dedup_cache.popitem(last=False)
 
     def query_task_data(self, task_id, time_range='6h'):
-        """Query time-series data for a specific task."""
+        """Query time-series data for a specific task.
+        Falls back to raw bucket with server-side aggregation if agg bucket is empty.
+        """
         bucket = self._select_bucket(time_range)
+        results = self._query_task_data_from_bucket(task_id, time_range, bucket)
+
+        # Fallback: if using an aggregation bucket and got no data, query raw with aggregation
+        if not results and bucket != self.bucket_raw:
+            agg_window = '1h' if bucket == self.bucket_1h else '1m'
+            results = self._query_task_data_aggregated_from_raw(task_id, time_range, agg_window)
+
+        return results
+
+    def _query_task_data_from_bucket(self, task_id, time_range, bucket):
+        """Direct query from a specific bucket."""
         flux = f'''
 from(bucket: "{bucket}")
   |> range(start: -{time_range})
@@ -143,6 +156,39 @@ from(bucket: "{bucket}")
                     'ttfb': record.values.get('ttfb'),
                     'total_time': record.values.get('total_time'),
                     'resolved_ip': record.values.get('resolved_ip'),
+                })
+        return results
+
+    def _query_task_data_aggregated_from_raw(self, task_id, time_range, window):
+        """Fallback: aggregate raw data on-the-fly when agg bucket is empty."""
+        flux = f'''
+from(bucket: "{self.bucket_raw}")
+  |> range(start: -{time_range})
+  |> filter(fn: (r) => r._measurement == "probe_result")
+  |> filter(fn: (r) => r.task_id == "{task_id}")
+  |> filter(fn: (r) => r._field == "latency" or r._field == "packet_loss" or r._field == "jitter"
+                     or r._field == "success" or r._field == "status_code")
+  |> aggregateWindow(every: {window}, fn: mean, createEmpty: false)
+  |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> sort(columns: ["_time"])
+'''
+        tables = self.query_api.query(flux, org=self.org)
+        results = []
+        for table in tables:
+            for record in table.records:
+                results.append({
+                    'timestamp': record.get_time().isoformat(),
+                    'latency': record.values.get('latency'),
+                    'packet_loss': record.values.get('packet_loss'),
+                    'jitter': record.values.get('jitter'),
+                    'success': record.values.get('success'),
+                    'status_code': record.values.get('status_code'),
+                    'dns_time': None,
+                    'tcp_time': None,
+                    'tls_time': None,
+                    'ttfb': None,
+                    'total_time': None,
+                    'resolved_ip': None,
                 })
         return results
 

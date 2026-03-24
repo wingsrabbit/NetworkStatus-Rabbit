@@ -58,7 +58,7 @@ function latencyColor(latency: number | null | undefined) {
 
 function formatLatency(val: number | null | undefined) {
   if (val == null) return '-'
-  return `${val.toFixed(1)} ms`
+  return `${val.toFixed(2)} ms`
 }
 
 function goToDetail(task: DashboardTask) {
@@ -101,7 +101,7 @@ function goToDetail(task: DashboardTask) {
               </div>
               <NSpace :size="24">
                 <NStatistic label="延迟" :value="formatLatency(task.latest?.latency)" />
-                <NStatistic v-if="task.latest?.packet_loss != null" label="丢包" :value="`${task.latest.packet_loss}%`" />
+                <NStatistic v-if="task.latest?.packet_loss != null" label="丢包" :value="`${task.latest.packet_loss.toFixed(2)}%`" />
                 <NStatistic v-if="task.latest?.status_code != null" label="状态码" :value="task.latest.status_code" />
               </NSpace>
             </NSpace>

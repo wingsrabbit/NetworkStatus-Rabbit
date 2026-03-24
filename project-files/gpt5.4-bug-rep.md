@@ -1,328 +1,385 @@
-# NetworkStatus-Rabbit Bug Report
+# NetworkStatus-Rabbit v0.12 Bug Report
 
 任务名称：debug NetworkStatus-Rabbit
+
+报告版本：v0.12
 
 报告时间：2026-03-24
 
 结论级别：高置信度
 
----
-
-## 1. 问题摘要
-
-当前线上现象是：
-
-1. Dashboard 卡片页可以正常看到任务最新延迟/丢包数据。
-2. 点击进入任务详情页后，统计卡全部为空，数据点数为 0。
-3. 图表区域没有正常曲线，底部出现 `Invalid Date`。
-
-结合当前仓库代码，问题不是单点故障，而是两处相互叠加的缺陷：
-
-1. Agent 上报的 `timestamp` 格式错误，导致时序数据大概率没有被正确写入 InfluxDB。
-2. 任务详情页消费实时 WebSocket 数据时，前后端消息结构不一致，导致前端拿不到正确的 `latency/packet_loss/jitter` 字段，并把非法时间直接送进图表。
-
-这两处问题叠加后，就会形成你现在看到的完整症状：
-
-1. Dashboard 正常，因为它主要看的是服务端内存中的最新结果缓存。
-2. Detail 空白，因为它主要依赖 InfluxDB 历史数据查询。
-3. Detail 页面出现 `Invalid Date`，因为实时推送带来的时间字段格式不合法，且消息结构不匹配。
+说明：本报告合并了上一轮任务详情页问题与本轮新发现问题，作为 v0.12 统一问题报告。
 
 ---
 
-## 2. 根因一：Agent 时间戳格式错误
+## 1. 现状摘要
 
-### 2.1 证据
+当前任务详情页已经能正常显示短周期数据，不再出现 `Invalid Date`，但仍然存在 5 类核心问题：
 
-文件：agent/ws_client.py
+1. 上方统计卡不会随实时数据持续刷新。
+2. `30 分钟` 到 `24 小时` 的切换缺少可感知差异。
+3. `7 天` 和 `30 天` 视图会混入秒级实时点，粒度错误。
+4. `7 天` 和 `30 天` 的聚合数据链路缺少运行时保障，导致点数异常少或直接为空。
+5. 前端数值展示没有统一两位小数规范，导致有时显示过长浮点数，有时又被错误截成 `0.0`。
 
-当前实现：
-
-```python
-payload = {
-    'result_id': result_id,
-    'task_id': task_id,
-    'timestamp': timestamp.isoformat() + 'Z',
-    'protocol': protocol,
-    'metrics': result.to_dict(),
-}
-```
-
-而 `timestamp` 的来源在 agent/scheduler.py：
-
-```python
-now = datetime.now(timezone.utc)
-```
-
-这里的 `now` 已经是带时区的 UTC 时间。Python 对这种对象调用 `isoformat()`，通常会得到：
-
-```text
-2026-03-24T12:34:56.789123+00:00
-```
-
-代码又额外拼接了一个 `Z`，结果会变成：
-
-```text
-2026-03-24T12:34:56.789123+00:00Z
-```
-
-这不是合法的标准 RFC3339/ISO8601 UTC 表达。
-
-### 2.2 为什么这会造成“详情页无数据”
-
-服务端接收到 agent 结果后，会在 server/ws/agent_handler.py 中调用：
-
-```python
-influx_service.write_probe_result({... 'timestamp': data.get('timestamp'), ...})
-```
-
-再进入 server/services/influx_service.py：
-
-```python
-if ts:
-    if isinstance(ts, str):
-        point = point.time(ts, WritePrecision.S)
-```
-
-如果传入的是 `2026-03-24T12:34:56.789123+00:00Z` 这种非法时间字符串，Influx 写入极大概率失败。
-
-而 server/ws/agent_handler.py 对写入异常的处理是：
-
-```python
-except Exception as e:
-    logger.error(f"Failed to write probe result: {e}")
-```
-
-也就是说：
-
-1. 写入失败不会阻断后续流程。
-2. Dashboard 仍然会继续收到“最新结果缓存”。
-3. 但 Detail 页查询 Influx 历史数据时就是空的。
-
-这与线上现象完全吻合：
-
-1. Dashboard 有最新值。
-2. Detail `平均延迟/P95/平均丢包/数据点数` 全空。
-3. 图表也没有历史曲线。
-
-### 2.3 影响范围
-
-影响所有任务详情页，不区分协议。只要数据写入链路经过这段代码，就会中招。
+你这次新增的问题里，最明确的一条是“前端所有延迟数据都应统一显示到小数点后两位，后端不用改”。这一点从当前代码看还没有落实。
 
 ---
 
-## 3. 根因二：任务详情页实时消息结构不一致
+## 2. 问题一：统计卡不会随实时数据更新
 
-### 3.1 前端期待的数据结构
+### 2.1 现象
 
-文件：web/src/views/TaskDetailView.vue
+下方图表持续向前滚动时，上方的：
 
-前端把历史接口返回和实时推送都当成 `ProbeResult` 使用：
+1. 平均延迟
+2. P95 延迟
+3. 平均丢包
+4. 数据点数
+
+仍然停留在进入页面或上一次切换时间范围时的值，不会跟着实时变化。
+
+### 2.2 代码证据
+
+文件：`web/src/views/TaskDetailView.vue`
+
+首屏和切换范围时：
 
 ```ts
-const result = data.result as ProbeResult
-points.value.push(result)
+const [dataRes, statsRes] = await Promise.all([
+  getTaskData(taskId, { range: range.value }),
+  getTaskStats(taskId, { range: range.value }),
+])
+points.value = dataRes.data.data
+stats.value = statsRes.data.stats
+updateChart()
 ```
 
-`ProbeResult` 的定义在 web/src/types/index.ts：
+实时更新时：
 
 ```ts
-export interface ProbeResult {
-  timestamp: string
-  latency: number | null
-  packet_loss: number | null
-  jitter: number | null
-  success: boolean | null
-  ...
+function handleRealtimeUpdate(data: any) {
+  if (data.task_id !== taskId) return
+  const result = data.result as ProbeResult
+  if (!result) return
+  points.value.push(result)
+  if (points.value.length > 500) points.value.shift()
+  updateChart()
 }
 ```
 
-也就是说，详情页期待的是“扁平结构”：
+这里的行为是：
 
-```json
-{
-  "timestamp": "...",
-  "latency": 12.3,
-  "packet_loss": 0,
-  "jitter": 1.2,
-  "success": true
-}
-```
+1. 只更新 `points.value`。
+2. 只重绘图表。
+3. 不重算 `stats.value`。
+4. 也不重新请求 `/stats`。
 
-### 3.2 后端实际推送的数据结构
+### 2.3 结论
 
-文件：server/ws/dashboard_handler.py
+统计卡和图表走了两条不同的更新链路，所以现在的详情页在逻辑上是“半实时”的，不是完整实时。
+
+---
+
+## 3. 问题二：`30 分钟` 到 `24 小时` 切换缺少可感知差异
+
+### 3.1 现象
+
+切换 `30 分钟 / 1 小时 / 6 小时 / 24 小时` 时，页面经常看起来没什么变化。
+
+### 3.2 代码证据
+
+文件：`server/services/influx_service.py`
 
 ```python
-def push_task_detail(task_id, result_data):
-    socketio.emit('dashboard_task_detail', {
-        'task_id': task_id,
-        'result': result_data,
-    }, room=room, namespace='/dashboard')
+if hours <= 24:
+    return self.bucket_raw
+elif hours <= 7 * 24:
+    return self.bucket_1m
+else:
+    return self.bucket_1h
 ```
 
-而 `result_data` 来自 server/ws/agent_handler.py：
+这意味着：
 
-```python
-push_task_detail(task_id, data)
-```
+1. `30m`
+2. `1h`
+3. `6h`
+4. `24h`
 
-这里传进去的 `data` 是 agent 原始包，结构是：
+全部都走同一个 `raw` bucket。
 
-```json
-{
-  "result_id": "...",
-  "task_id": "...",
-  "timestamp": "2026-03-24T12:34:56.789123+00:00Z",
-  "protocol": "icmp",
-  "metrics": {
-    "latency": 0.2,
-    "packet_loss": 0,
-    "jitter": null,
-    "success": true
-  }
-}
-```
-
-注意这里的 `latency/packet_loss/jitter/success` 都在 `metrics` 里面，不在顶层。
-
-### 3.3 为什么这会造成 `Invalid Date` 和图表异常
-
-文件：web/src/views/TaskDetailView.vue
-
-图表直接读取：
+文件：`web/src/views/TaskDetailView.vue`
 
 ```ts
-const times = points.value.map((p) => dayjs(p.timestamp).format('HH:mm:ss'))
-const latencies = points.value.map((p) => p.latency)
-const losses = points.value.map((p) => p.packet_loss)
-const jitters = points.value.map((p) => p.jitter)
+watch(range, () => fetchData())
 ```
 
-问题在于：
+同时横轴统一格式化为：
 
-1. 实时推送里的 `timestamp` 是非法格式 `+00:00Z`，`dayjs()` 解析后会得到 `Invalid Date`。
-2. 实时推送里的 `latency/packet_loss/jitter` 不在顶层，前端读取到的是 `undefined`。
+```ts
+dayjs(p.timestamp).format('HH:mm:ss')
+```
 
-所以你截图中的现象正好成立：
+### 3.3 结论
 
-1. 横轴出现 `Invalid Date`。
-2. 图上没有有效折线。
-3. Detail 页面即使有实时消息，也无法正确展示。
+当前范围切换虽然会重新查询，但：
 
----
+1. 数据源分辨率没变化。
+2. 横轴表达没变化。
+3. 页面没有显示当前窗口、采样粒度、实际起止时间。
 
-## 4. 为什么 Dashboard 卡片页看起来又是正常的
-
-这是因为 Dashboard 和 Detail 走的不是同一条数据链路。
-
-Dashboard 列表页主要依赖：
-
-1. server/ws/agent_handler.py 中的 `_latest_results` 内存缓存。
-2. server/api/data.py 的 `/api/data/dashboard` 返回值。
-3. server/app.py 每秒推送的 `dashboard_probe_snapshot`。
-
-这条链路并不依赖 Influx 查询结果是否成功落盘，也不展示时间轴，所以即使历史写入失败，首页卡片依然能看到“最新延迟”。
-
-Detail 页则不同：
-
-1. 首屏加载调用 `/api/data/task/<task_id>` 和 `/api/data/task/<task_id>/stats`。
-2. 这两个接口都直接查 InfluxDB。
-3. 如果 Influx 没写进去，首屏就是空。
-4. 后续再叠加错误的实时消息结构，就只会出现 `Invalid Date` 和空图。
+所以用户非常容易判断成“切换没有生效”。
 
 ---
 
-## 5. 结论归纳
+## 4. 问题三：`7 天 / 30 天` 视图混入了错误粒度的实时点
 
-本次问题的核心根因链如下：
+### 4.1 现象
 
-1. Agent 生成了非法 UTC 时间字符串：`timestamp.isoformat() + 'Z'`。
-2. 服务端把这个非法时间直接用于 Influx 写入。
-3. 写入失败后仅记日志，不阻断 Dashboard 内存态更新。
-4. 所以首页卡片仍显示“正常运行”。
-5. Detail 页查询 Influx 历史数据时为空，因此统计卡和图表为空。
-6. 同时，Detail 页订阅到的实时消息结构又与前端 `ProbeResult` 类型不一致。
-7. 非法时间继续触发 `Invalid Date`，嵌套 `metrics` 又让折线值变成 `undefined`。
+你提供的截图已经能明确说明：
 
-所以这不是“前端图表自己坏了”，而是“存储链路 + 实时消息契约”同时有问题。
+1. `7 天` 视图不应该继续按 3 到 4 秒一个点增长。
+2. `30 天` 视图也不应该继续出现秒级点。
 
----
+它们应该分别是：
 
-## 6. 建议修复顺序
+1. `7 天` 按 1 分钟级别展示。
+2. `30 天` 按 1 小时级别展示。
 
-### P0：先修时间戳格式
+### 4.2 代码证据
 
-建议把 agent 侧时间序列化改成合法 UTC 形式，二选一即可：
-
-方案 A：直接使用 aware datetime 的标准输出，不再拼 `Z`
+后端确实想这么做。文件：`server/services/influx_service.py`
 
 ```python
-'timestamp': timestamp.isoformat(),
+if hours <= 24:
+    return self.bucket_raw
+elif hours <= 7 * 24:
+    return self.bucket_1m
+else:
+    return self.bucket_1h
 ```
 
-方案 B：输出标准 `Z` 结尾格式，但先把 `+00:00` 替换掉
+但前端在任何 range 下都执行相同的实时 append：
 
-```python
-'timestamp': timestamp.isoformat().replace('+00:00', 'Z'),
-```
-
-这一项不修，Detail 页历史数据会持续为空。
-
-### P0：统一 `dashboard_task_detail` 消息结构
-
-后端推给前端的 `result` 必须改成与 `ProbeResult` 一致的扁平结构，例如：
-
-```json
-{
-  "task_id": "...",
-  "result": {
-    "timestamp": "2026-03-24T12:34:56.789123Z",
-    "latency": 0.2,
-    "packet_loss": 0,
-    "jitter": null,
-    "success": true,
-    "status_code": null,
-    "dns_time": null,
-    "tcp_time": null,
-    "tls_time": null,
-    "ttfb": null,
-    "total_time": null,
-    "resolved_ip": null
-  }
+```ts
+function handleRealtimeUpdate(data: any) {
+  if (data.task_id !== taskId) return
+  const result = data.result as ProbeResult
+  if (!result) return
+  points.value.push(result)
+  if (points.value.length > 500) points.value.shift()
+  updateChart()
 }
 ```
 
-不要再直接把 agent 原始 payload 透传给详情页。
+### 4.3 结论
 
-### P1：补一条写入失败的可观测性
+现在的逻辑是：
 
-当前写 Influx 失败只是记日志，业务层没有任何显式告警。建议至少增加：
+1. 先查长周期聚合数据。
+2. 再无条件把秒级实时点塞进同一个 `points.value`。
 
-1. 写入失败计数。
-2. 最近一次写入错误摘要。
-3. 面板或日志中可快速识别“Dashboard 有数据但 Detail 无历史”的状态。
-
----
-
-## 7. 建议验证步骤
-
-修复后建议按以下顺序验证：
-
-1. 新建一个 ICMP 任务。
-2. 观察 Dashboard 卡片是否继续有实时数据。
-3. 进入 Detail 页面，确认首屏 `数据点数` 大于 0。
-4. 确认 `平均延迟/P95/平均丢包` 正常显示。
-5. 确认图表横轴不再出现 `Invalid Date`。
-6. 再观察 1 到 2 分钟，确认实时曲线持续追加，不再出现空点或 undefined。
+这会直接破坏 `7d/30d` 的时间粒度语义，导致“历史聚合曲线 + 实时原始点”混流。
 
 ---
 
-## 8. 本次报告的边界说明
+## 5. 问题四：`7 天 / 30 天` 数据点本身也不可靠
 
-本报告基于以下证据形成：
+### 5.1 现象
 
-1. 当前仓库源码静态分析。
-2. 你提供的线上页面截图。
-3. 前后端数据结构和调用链逐段核对。
+从你这次截图看：
 
-当前环境的命令策略禁止直接使用 `Invoke-WebRequest`/`curl` 对线上接口做补充抓包，因此没有附上线上 API 原始响应样本；但从代码路径和现象对照来看，以上结论已经足够闭环，且置信度高。
+1. `7 天` 页面数据点数只有 7，明显偏少。
+2. `30 天` 页面上方统计可能是 0，但下方图上仍然有线，说明“统计结果”和“图表点集”已经不一致。
+
+这不是单纯的显示问题，而是长周期数据链路本身不稳。
+
+### 5.2 代码证据
+
+应用写入时只写 `raw`：
+
+```python
+self.write_api.write(bucket=self.bucket_raw, record=point)
+```
+
+仓库里虽然有 `scripts/setup-influxdb.py`，定义了：
+
+1. `raw -> agg_1m`
+2. `agg_1m -> agg_1h`
+
+但应用运行时并不会：
+
+1. 检查 downsampling task 是否存在。
+2. 检查 `agg_1m` / `agg_1h` 是否持续产出。
+3. 在长周期 bucket 不可用时做兜底或报错。
+
+### 5.3 结论
+
+因此 `7d/30d` 现在同时有两层问题：
+
+1. 查询的数据源可能本身就不完整。
+2. 即便历史数据正确，前端还会把秒级实时点继续混进去。
+
+这就是你现在看到“7 天点数不对、30 天统计和图形对不上”的根因组合。
+
+---
+
+## 6. 问题五：前端小数位规范不统一
+
+### 6.1 现象
+
+你这次新增的问题非常明确：
+
+1. tooltip 中出现了过长浮点数，例如：
+   `0.21000000000000002`
+   `0.034733333333333333`
+2. 统计卡有时会显示 `0.0 ms`，这对像 `0.0421` 这样的值来说很奇怪。
+3. 你要求的是：前端所有延迟类数据统一保留两位小数，例如 `0.0421 -> 0.04`，后端无需修改。
+
+### 6.2 代码证据
+
+文件：`web/src/views/TaskDetailView.vue`
+
+图表 tooltip 当前没有 formatter：
+
+```ts
+tooltip: { trigger: 'axis' }
+```
+
+这意味着 ECharts 会直接展示原始浮点值，所以会把 JS 浮点误差直接暴露给用户。
+
+同文件中，统计卡目前使用的是一位小数：
+
+```ts
+stats.avg_latency.toFixed(1)
+stats.p95_latency.toFixed(1)
+stats.avg_packet_loss.toFixed(1)
+```
+
+这会带来两个问题：
+
+1. 精度标准不统一，与你要求的“两位小数”不一致。
+2. 对于 `0.0421` 这样的值，`toFixed(1)` 会显示成 `0.0`，读起来像被吞掉了有效信息。
+
+另外，文件：`web/src/views/DashboardView.vue`
+
+```ts
+return `${val.toFixed(1)} ms`
+```
+
+说明首页卡片也同样只保留一位小数，和你要求的统一两位小数规范不一致。
+
+### 6.3 结论
+
+当前前端至少存在三种不统一的数值展示行为：
+
+1. 图表 tooltip 直接显示原始浮点数。
+2. 统计卡显示一位小数。
+3. 首页延迟卡也显示一位小数。
+
+这会让页面同一份数据在不同区域看起来像三种不同结果。
+
+---
+
+## 7. v0.12 需要落实的前端数值规范
+
+基于你这次的明确要求，v0.12 应补充一条统一规范：
+
+1. 所有延迟类数值前端统一显示为两位小数。
+2. 所有抖动类数值前端统一显示为两位小数。
+3. 丢包百分比前端也建议统一为两位小数，避免和延迟展示风格割裂。
+4. tooltip、统计卡、首页卡片、详情图表的标签和悬浮提示都必须使用同一套格式化函数。
+5. 后端保留原始精度，格式化仅发生在前端显示层。
+
+示例：
+
+1. `0.0421 -> 0.04`
+2. `0.2 -> 0.20`
+3. `0.21000000000000002 -> 0.21`
+4. `0.034733333333333333 -> 0.03`
+
+---
+
+## 8. 问题间的关系
+
+当前这些问题是耦合的：
+
+1. 统计卡不刷新，导致“实时图表”和“顶部摘要”分裂。
+2. `7d/30d` 实时混流，导致长周期图表本身不可信。
+3. 聚合桶缺少自检，导致长周期点数可能本身就不完整。
+4. 前端格式化不统一，又把同一批数据展示成了不同精度和不同观感。
+
+因此现在的问题不只是“显示不好看”，而是“同一页面不同区域对同一份数据给出了不一致的解释”。
+
+---
+
+## 9. 修复建议
+
+### P0：统一前端两位小数格式化
+
+优先级最高的新要求是显示规范统一。
+
+建议：
+
+1. 抽一个前端通用格式化函数，统一处理 ms、百分比和空值。
+2. `TaskDetailView` 的统计卡改为两位小数。
+3. `TaskDetailView` 的 tooltip 增加 formatter。
+4. `DashboardView` 的延迟卡改为两位小数。
+5. 图表坐标轴 label 如需显示数值，也统一走两位小数。
+
+### P0：实时更新时同步刷新统计卡
+
+建议：
+
+1. 每收到一条实时点，基于当前 `points.value` 重算统计。
+2. 或者以节流方式重拉 `/stats`。
+
+### P0：`7d/30d` 禁止直接混入秒级原始点
+
+建议：
+
+1. `30m~24h` 可以继续实时 append 原始点。
+2. `7d/30d` 应关闭这种 append。
+3. 如果未来要支持 `7d/30d` 实时更新，应按聚合粒度补点，而不是直接塞原始点。
+
+### P1：增强长周期数据链路可观测性
+
+建议：
+
+1. 检查 `agg_1m`、`agg_1h` 是否存在。
+2. 检查 downsampling task 是否运行。
+3. 对 `7d/30d` 查询失败返回明确诊断，而不是静默空白或数据错乱。
+
+### P1：增强范围切换反馈
+
+建议：
+
+1. 页面显示当前时间窗口。
+2. 页面显示当前采样粒度。
+3. 页面显示当前图表点数和实际时间范围。
+
+---
+
+## 10. v0.12 验收标准
+
+1. 详情页打开后，图表和顶部四个统计卡都应随实时数据同步更新。
+2. `30m / 1h / 6h / 24h` 切换后，页面应有明确可感知的窗口或粒度反馈。
+3. `7d` 页面不再每 3 到 4 秒追加一个原始点，而是保持分钟级逻辑。
+4. `30d` 页面不再混入秒级实时点，并且统计与图形一致。
+5. tooltip 中不再出现长浮点串，例如 `0.21000000000000002`。
+6. 所有延迟和抖动前端展示统一为两位小数，例如 `0.0421 -> 0.04`，不再出现 `0.0 ms` 这种误导性显示。
+
+---
+
+## 11. 最终结论
+
+v0.12 的核心不只是“把图画出来”，而是把任务详情页的数据语义统一起来。
+
+当前最关键的问题是：
+
+1. 统计卡、图表、长周期历史、实时数据流之间没有统一规则。
+2. `7d/30d` 的数据粒度和点数都不可靠。
+3. 前端格式化规则缺失，导致用户直接看到浮点误差或被错误四舍五入后的值。
+
+如果不把这几项一起收口，任务详情页虽然可用，但仍然不具备稳定、可信、可解释的监控含义。
