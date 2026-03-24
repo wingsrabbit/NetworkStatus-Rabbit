@@ -22,11 +22,14 @@ class DashboardNamespace(Namespace):
     def trigger_event(self, event, *args):
         """Map colon-delimited event names to underscore handler methods.
         e.g. 'dashboard:subscribe_task' -> on_dashboard_subscribe_task()
+        Uses socketio._handle_event to ensure Flask request context is set up.
         """
-        handler_name = 'on_' + event.replace(':', '_')
-        handler = getattr(self, handler_name, None)
-        if handler:
-            return handler(*args)
+        if ':' in event:
+            handler_name = 'on_' + event.replace(':', '_')
+            handler = getattr(self, handler_name, None)
+            if handler:
+                return self.socketio._handle_event(
+                    handler, event, self.namespace, *args)
         return super().trigger_event(event, *args)
 
     def on_connect(self):
