@@ -46,6 +46,7 @@ class WSClient:
             self.authenticated = False
             self._stop_heartbeat()
             self.scheduler.stop_all()
+            self.config_version = 0  # force full task sync on reconnect
 
         @sio.on('center:auth_result', namespace='/agent')
         def on_auth_result(data):
