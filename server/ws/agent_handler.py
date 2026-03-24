@@ -55,11 +55,13 @@ class AgentNamespace(Namespace):
     def trigger_event(self, event, *args):
         """Map colon-delimited event names to underscore handler methods.
         e.g. 'agent:auth' -> on_agent_auth()
+        Only intercept events containing ':', let connect/disconnect go through parent.
         """
-        handler_name = 'on_' + event.replace(':', '_')
-        handler = getattr(self, handler_name, None)
-        if handler:
-            return handler(*args)
+        if ':' in event:
+            handler_name = 'on_' + event.replace(':', '_')
+            handler = getattr(self, handler_name, None)
+            if handler:
+                return handler(*args)
         return super().trigger_event(event, *args)
 
     def on_connect(self):
