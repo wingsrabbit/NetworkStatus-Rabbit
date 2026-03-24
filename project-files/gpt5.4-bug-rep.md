@@ -2,7 +2,7 @@
 
 任务名称：debug NetworkStatus-Rabbit
 
-当前文档版本：v0.123
+当前文档版本：v0.124
 
 最后整理时间：2026-03-24
 
@@ -16,55 +16,78 @@
 
 ## 1. 当前状态
 
-### v0.123 当前问题
+### v0.124 当前问题
 
-1. 图表底部内容被 `dataZoom` 缩放条挤压，底部信息显示不完整。
-现象：你截图里底部的“延迟”图例/底部信息区域与缩放条过近，视觉上被挡住，需要整体下移或重新分配间距。
-代码依据：[web/src/views/TaskDetailView.vue](web/src/views/TaskDetailView.vue) 当前图表配置是：`legend: { bottom: 0 }`，`grid: { ..., bottom: 70 }`，`dataZoom: [{ type: 'slider', ..., bottom: 24, height: 20 }]`。这三者被压在同一条底部区域里，尤其 `slider` 的微型预览图会和图例、坐标轴标签争抢空间。
-实现思路：这类问题不需要改逻辑，直接改布局参数即可。按当前结构，建议至少做两项调整：
-1. 把 `grid.bottom` 从 `70` 提高到 `90` 或 `100`。
-2. 把 `slider.bottom` 明确下移，例如改到 `8` 到 `12`，并把 `legend.bottom` 提到 `28` 到 `32`。
-如果需要更稳，可以同时把图表容器高度从 `400px` 提到 `430px`。这是纯前端布局修正，风险低。
-影响：图表功能虽然可用，但底部信息被挡住后，缩放和图例会显得拥挤，影响基本可读性。
-验收标准：图例、缩放条、坐标轴标签三者不再重叠；底部信息完整可见。
-
-2. `最后更新` 的语义已经偏离工程文档，30 分钟等原始视图不再按“每条新探测结果”驱动刷新。
-现象：你要求在 30 分钟视图下，任务若配置为 1 秒间隔，就应该基本每 1 秒看到一次更新；但当前你观察到更新时间更像 4 秒一次，这已经直接影响统计误差和数据点数量。
+1. 图表发生数据更新时会重置缩放状态，局部查看被强行打回全量视图。
+现象：用户手动拖动 `dataZoom` 进入局部区间后，只要有新数据到达或页面定时刷新，缩放就被重置。这会让详情页在观察某个异常片段时几乎不可用。
 代码依据：
-1. [project-files/PROJECT.md](project-files/PROJECT.md) 的 7.8 节明确写死：`dashboard:task_detail` 是“订阅生效后每条新探测结果到达时”推送。
-2. [web/src/views/TaskDetailView.vue](web/src/views/TaskDetailView.vue) 里当前原始视图刷新频率被改成了轮询：`30m/1h -> 10_000ms`，`6h/24h -> 15_000ms`。这说明顶部统计和整页刷新已经不再跟着每条结果走。
-3. [web/src/views/LayoutView.vue](web/src/views/LayoutView.vue) 里的页脚 `最后更新` 由全局 `__nsr_markDataReceived()` 驱动，但这个标记既会在 `handleRealtimeUpdate()` 中调用，也会在每次 `fetchData()` 成功后调用。也就是说，即便只是定时重拉到了同一批旧数据，页脚也会被重置成“10秒内”，它不再严格代表“收到了一条新的探测结果”。
+1. [web/src/views/TaskDetailView.vue](web/src/views/TaskDetailView.vue) 的 `updateChart()` 每次都会重新计算 `now = Date.now()`，然后把 `xAxis.min/max` 重设为 `now - windowMs` 与 `now`。
+2. 同一处调用 `chart.value.setOption(..., true)`，第二个参数是 `notMerge=true`，会把现有的 `dataZoom` 状态整体覆盖掉。
+3. 当前页面只维护了 `isZoomed` 布尔值，没有真正记录用户当前缩放区间，例如 `startValue/endValue` 或可见时间窗。
 实现思路：
-1. 对原始视图，页脚的“最后更新”应只绑定 `dashboard_task_detail` 新结果到达，不应在 `fetchData()` 成功后无条件刷新。
-2. `fetchData()` 保留给首屏加载、切换范围和长周期定时刷新使用。
-3. 原始视图的顶部统计若要准实时，可以按“每条新结果到达时节流 1 秒重拉 stats/data”或“基于窗口内数据重算”，但不能再把 10 秒轮询当成“最新更新时间”。
-影响：当前页脚会给出错误的新鲜度暗示，用户会误判系统采样频率和任务运行状态。
-验收标准：原始视图下，`最后更新` 应与新探测结果实际到达时间一致；不能因为一次普通轮询成功就伪装成新数据到达。
+1. 不要在每次刷新时用 `notMerge=true` 整体重建图表；更新数据序列时应优先走局部 `setOption` 合并。
+2. 在 `datazoom` 事件里记录真实可见区间，至少保存 `startValue/endValue`，而不是只保存一个布尔值。
+3. 当用户处于缩放态时，实时更新只能更新 `series.data`，不能覆盖 `xAxis.min/max`；只有用户点击“重置缩放”或切换 range 时，才恢复基础窗口。
+4. 如果要兼顾“原始窗口继续向前推进”和“用户局部观察不被打断”，可以维护两套窗口：基础窗口持续滑动，当前可见窗口在缩放态下冻结，退出缩放后再回到基础窗口。
+影响：目前详情页的缩放功能名义上存在，但一旦有实时数据就失效，无法支撑对异常片段进行持续观察。
+验收标准：缩放后即便新数据到达、stats 刷新或定时拉取发生，图表仍保持用户当前局部视图；只有手动重置或切换 range 才回到全量窗口。
 
-3. 任务采样周期本身存在调度漂移，`interval=1` 不等于“严格每秒 1 条结果”。
-现象：即使任务配置为 1 秒间隔，当前实际结果到达周期也可能变成 1 秒以上，严重时接近“探测耗时 + interval”，这会直接拉低 `数据点数`，并放大统计误差。
-代码依据：[agent/scheduler.py](agent/scheduler.py) 的 `_task_loop()` 当前逻辑是先执行 `probe.probe(...)`，再执行 `stop_event.wait(interval)`。这意味着真实周期是：
-`一次探测耗时 + interval`，而不是“每隔 interval 开始一次探测”。
-这与 [project-files/PROJECT.md](project-files/PROJECT.md) 中 `interval` 的定义“探测间隔（秒），1-60”存在实现偏差。
-实现思路：调度器不应采用“执行完再睡 interval”的串行模型，而应改成固定节拍模型：
-1. 记录 `next_run_at`。
-2. 每次执行完探测后，`next_run_at += interval`。
-3. 睡眠 `max(0, next_run_at - now)`。
-这样即便单次探测耗时波动，整体采样节奏仍尽量贴近配置间隔。若探测耗时长期超过 interval，则应显式记录“任务过载/采样滞后”。
-影响：这不仅影响页脚更新时间，更会直接导致 `total_probes` 少于理论值，例如 30 分钟窗口下本应接近 1800，却明显偏低。
-验收标准：`interval=1` 的任务在正常探测耗时范围内，结果到达频率应尽量接近 1 秒 1 条；如果做不到，系统应能明确识别并暴露采样滞后。
-
-4. `数据点数` 相关实现需要按最新代码重新定义，当前前端仍未用上后端已返回的理论计数元数据。
-现象：你指出 30 分钟窗口下理论上应接近 1800 条，而当前页面只显示 1692、443 这类数字，用户无法知道这是采样丢失、调度漂移，还是窗口刚开始积累不足。
+2. `icmp` 的“1 秒任务却 3 到 4 秒才更新一次”不是前端问题，而是 probe 实现本身和 `tcp` 不是同一种采样语义。
+现象：`tcp` 测试可以做到接近 1 秒 1 条，但 `icmp` 在同样配置下变成 3 到 4 秒才出 1 条结果，看起来像链路更新模块坏了，实际是协议实现不一致。
 代码依据：
-1. 后端 [server/api/data.py](server/api/data.py) 现在已经在 `/task/<task_id>/stats` 里追加了 `interval_seconds`、`window_start`、`window_end`、`expected_probes`。
-2. 但前端 [web/src/views/TaskDetailView.vue](web/src/views/TaskDetailView.vue) 仍然只显示 `stats.total_probes`，完全没有使用 `expected_probes`。
-实现思路：这项需求现在不需要再扩后端字段，核心是前端消费方式要改：
-1. 主值建议显示 `实际记录次数/理论次数`，例如 `1692 / 1800`。
-2. 如果 UI 不想显示双值，也至少要把 `expected_probes` 放进 tooltip 或副标题里。
-3. 同时结合上面的调度器修正，区分“理论次数偏少是系统调度问题”还是“窗口尚未积满”。
-影响：当前单独显示 `total_probes` 容易误导，用户看不到系统到底是“正常积累中”还是“实际掉点”。
-验收标准：`数据点数` 必须能同时表达“实际记录次数”和“理论应有次数”的关系，至少让用户可以判断是否存在采样偏差。
+1. [agent/scheduler.py](agent/scheduler.py) 当前 `_task_loop()` 已经是固定节拍模型：`next_run += interval` 后按剩余时间等待，所以“执行完再睡 interval”的老问题在当前代码里已经不是主因。
+2. [agent/probes/tcp_probe.py](agent/probes/tcp_probe.py) 每轮只做一次 `socket.create_connection()`，一次任务循环产出一条结果。
+3. [agent/probes/icmp_probe.py](agent/probes/icmp_probe.py) 当前却写死了 `count = 4`，Windows 走 `ping -n 4`，Linux 走 `ping -c 4`。这意味着一次“ICMP 探测结果”内部其实包含 4 个 ping 子样本，Windows 默认子样本之间还会有约 1 秒间隔，所以单轮天然会拖到 3 到 4 秒。
+4. [agent/probes/udp_probe.py](agent/probes/udp_probe.py)、[agent/probes/http_probe.py](agent/probes/http_probe.py)、[agent/probes/dns_probe.py](agent/probes/dns_probe.py) 当前都属于“一轮任务做一次探测并回一条结果”的模式；所谓 `ssl` 在当前代码里并不是独立协议，而是 [agent/probes/http_probe.py](agent/probes/http_probe.py) 中 `https` URL 的同一条请求链路。
+实现思路：
+1. 如果产品语义要求“任务 interval=1 就应接近每秒 1 条结果”，那 `icmp` 不能继续保留 `count=4` 的批量 ping 语义，应改成和 `tcp/udp/http/dns` 一样的单次探测模型，即每轮只发 1 个 echo request。
+2. `icmp` 现有的 `packet_loss` 和 `jitter` 不能再靠“一次命令里打 4 个包”来算，应该改成基于最近 N 条单次结果在服务端或前端窗口内再计算。否则 `icmp` 会永远和其他协议不在一个节拍体系里。
+3. `udp/http(dns/tls)/dns` 不需要“抄 tcp 模块”，因为它们本来就是单次采样；真正要统一的是“每个任务循环只产出一条基础样本”的设计约束。
+影响：当前 `icmp` 的结果频率、数据点数、丢包/抖动语义都和其他协议不一致，用户会误以为只有 `icmp` 有更新故障。
+验收标准：`interval=1` 的 `icmp` 任务在正常网络下应接近 1 秒 1 条结果；各协议统一遵守“一次调度循环 = 一条基础样本”的规则。
+
+3. 当前时间窗口直接贴着 `now` 画到最右侧，没有给探测完成和超时判定预留会合区，天然会制造“最后几秒像丢点”的假象。
+现象：页面当前把最右边界直接对齐当前时间，导致最近几秒内那些“还在探测中”或“尚未到达超时阈值”的样本也被视作窗口内应出现的数据。用户看到的效果就是尾部像缺点、掉点，统计也会被误读。
+代码依据：
+1. [web/src/views/TaskDetailView.vue](web/src/views/TaskDetailView.vue) 当前 `updateChart()` 固定使用 `xAxis.max = Date.now()`，没有任何安全尾巴。
+2. [server/api/data.py](server/api/data.py) 当前 `task_stats()` 计算 `window_end` 和 `expected_probes` 也是直接用 `now`，没有考虑任务 `timeout` 或数据会合延迟。
+3. [project-files/PROJECT.md](project-files/PROJECT.md) 的任务模型里 `timeout` 明确定义为探测超时时间；在这个语义下，尾部未完成样本在超时前本来就不应被当作“缺失结果”。
+实现思路：
+1. 详情页的展示窗口右边界不应直接取当前墙钟时间，而应取“当前时间减去安全尾巴”。按你举的例子，当前更合理的是把尾巴至少设为任务 `timeout` 秒，默认就是 10 秒；如果只写死 5 秒，会和“超过 10 秒才算超时”这条规则冲突。
+2. 前端图表、顶部统计、`expected_probes` 的理论计数都应使用同一套 `effective_window_end`，否则图表和统计会互相打架。
+3. 原始视图下新结果可以先进本地 buffer，等其时间戳进入“可见窗口”后再并入图表，这就是允许数据会合，而不是把还没结束的采样硬算成丢失。
+影响：如果不做安全尾巴，最近一段时间的曲线和数据点数永远偏小，用户会把“尚未完成”误认成“系统漏写”或“探测失败”。
+验收标准：当当前时间为 13:58:00 时，图表与统计的最右边界不直接落在 13:58:00，而是落在统一定义的安全会合点；尾部不再因为尚未完成的探测而表现成假性掉点。
+
+4. 时间范围与刷新粒度没有按 Project 6.2 和 10.3 实现，前端目前少了 `3d`、`14d`，刷新节拍也不是按秒/分钟/小时边界对齐。
+现象：用户现在明确要求的范围是：`30m`、`1h`、`6h`、`24h`、`3d`、`7d`、`14d`、`30d`。但当前详情页只有 `30m/1h/6h/24h/7d/30d`，少了 `3d` 和 `14d`。同时，刷新节奏现在是 `10s/15s/60s/300s` 这种任意轮询，不是“30 分钟到 24 小时按秒、3 天到 7 天按分钟、14 天到 30 天按小时”的规格。
+代码依据：
+1. [project-files/PROJECT.md](project-files/PROJECT.md) 的 6.2 已经写死 bucket 语义：`24h -> raw`，`3d/7d -> agg_1m`，`14d/30d -> agg_1h`。
+2. [project-files/PROJECT.md](project-files/PROJECT.md) 的 10.3 布局描述里也明确列出了 `3d` 与 `14d` 两档范围。
+3. [web/src/views/TaskDetailView.vue](web/src/views/TaskDetailView.vue) 现在 `rangeOptions` 缺少 `3d`、`14d`；`refreshInterval()` 仍然返回 `10_000/15_000/60_000/300_000`；`xAxisLabelFormat` 也没有为 `3d`、`14d` 单独定义粒度。
+4. [server/services/influx_service.py](server/services/influx_service.py) 的 `_select_bucket()` 实际已经支持这两档区间：`<=24h` 走 raw，`<=7d` 走 1m，其他走 1h。也就是说后端 bucket 选择大体够用，主要缺口在前端范围与刷新策略。
+实现思路：
+1. 前端 range 选项应补齐为 8 档：`30m/1h/6h/24h/3d/7d/14d/30d`。
+2. 刷新逻辑不要再用随意的固定轮询，而应改成“对齐边界”的调度：
+	- `30m ~ 24h`：按秒边界刷新；
+	- `3d ~ 7d`：按分钟边界刷新；
+	- `14d ~ 30d`：按小时边界刷新。
+3. range 切换后，图表标签格式、tooltip 时间格式、理论点数计算、bucket 选择都要跟着统一切换。
+4. 原始视图仍可继续吃 websocket 增量，但秒级视图的整页重算也应落在秒边界，而不是任意时刻触发。
+影响：当前实现和工程规格脱节，用户看到的不是“bucket 粒度视图”，而是“不稳定轮询 + 缺失范围”的混合行为。
+验收标准：详情页范围完整支持 8 档；`30m~24h` 视图以秒为刷新节点，`3d~7d` 以分钟为刷新节点，`14d~30d` 以小时为刷新节点；bucket 选择与 Project 6.2 一致。
+
+5. `数据点数` 需要从“原始 total_probes”升级为“实际记录数 / 理论记录数（基于有效窗口）”，否则无法判断是正常会合、协议语义差异，还是实际掉点。
+现象：现在页面虽然已经显示 `total_probes / expected_probes`，但这个理论值还是按“当前时间直达右边界”的旧窗口算出来的，一旦引入安全尾巴或新增 `3d/14d` 粒度，这个数字就会继续失真。
+代码依据：
+1. [server/api/data.py](server/api/data.py) 当前 `expected_probes = range_seconds // task.interval`，它没有使用“有效窗口终点”，也没有区分聚合 bucket 下的分钟级/小时级统计语义。
+2. [web/src/views/TaskDetailView.vue](web/src/views/TaskDetailView.vue) 当前虽然展示了 `stats.total_probes / stats.expected_probes`，但没有告诉用户理论值是按什么窗口、什么粒度算的。
+实现思路：
+1. 原始视图下，理论记录数应基于“有效窗口长度 / task.interval”计算，窗口终点取会合后的 `effective_window_end`。
+2. 聚合视图下，不应再沿用“按探测 interval 算理论秒级点数”的展示，而应明确展示“已聚合桶数 / 理论桶数”，否则 `3d/7d/14d/30d` 会把 bucket 语义和原始样本语义混在一起。
+3. 详情页文案建议明确区分：`原始样本数`、`理论样本数`、`聚合桶数`，避免用户把分钟桶数误读成秒级掉点。
+影响：如果不重定义这个指标，后续即便补了会合区和新 range，页面仍然会不断制造“少点了”的误报。
+验收标准：不同范围下的数据点指标都能解释清楚“为什么是这个数”，用户能分辨当前看到的是原始样本缺失、聚合桶数量，还是正常会合延迟。
 
 ---
 

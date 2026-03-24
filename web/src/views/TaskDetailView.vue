@@ -2,7 +2,7 @@
 import { onMounted, onUnmounted, ref, watch, shallowRef, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import {
-  NCard, NSpace, NSelect, NStatistic, NGrid, NGi, NSpin, NPageHeader, NButton
+  NCard, NSpace, NSelect, NStatistic, NGrid, NGi, NSpin, NPageHeader, NButton, NTooltip
 } from 'naive-ui'
 import * as echarts from 'echarts'
 import dayjs from 'dayjs'
@@ -26,7 +26,9 @@ const rangeOptions = [
   { label: '1 小时', value: '1h' },
   { label: '6 小时', value: '6h' },
   { label: '24 小时', value: '24h' },
+  { label: '3 天', value: '3d' },
   { label: '7 天', value: '7d' },
+  { label: '14 天', value: '14d' },
   { label: '30 天', value: '30d' },
 ]
 
@@ -36,11 +38,39 @@ const isRawRange = computed(() => ['30m', '1h', '6h', '24h'].includes(range.valu
 /** 是否处于局部缩放状态 */
 const isZoomed = ref(false)
 
+/** 缩放态下保存的当前可见区间百分比 */
+const zoomStart = ref(0)
+const zoomEnd = ref(100)
+
+/** 安全尾巴（毫秒），基于任务 timeout，从 stats 返回 */
+const tailMarginMs = computed(() => {
+  const timeout = stats.value.timeout_seconds
+  return (timeout != null ? timeout : 10) * 1000
+})
+
 /** 统一格式化：两位小数 */
 function fmt(val: number | null | undefined): string {
   if (val == null) return '-'
   return val.toFixed(2)
 }
+
+/** 数据点数展示文案 */
+const dataPointLabel = computed(() => {
+  const s = stats.value
+  if (s.total_probes == null) return '-'
+  if (s.expected_probes != null) {
+    const label = s.bucket_type === 'raw' ? '原始样本' : (s.bucket_type === '1m' ? '分钟桶' : '小时桶')
+    return `${s.total_probes} / ${s.expected_probes}`
+  }
+  return String(s.total_probes)
+})
+
+const dataPointTooltip = computed(() => {
+  const s = stats.value
+  if (s.expected_probes == null) return ''
+  const label = s.bucket_type === 'raw' ? '原始样本' : (s.bucket_type === '1m' ? '分钟级聚合桶' : '小时级聚合桶')
+  return `${label}：实际 ${s.total_probes} / 理论 ${s.expected_probes}`
+})
 
 /** 将 range 字符串转为毫秒数 */
 function rangeToMs(r: string): number {
@@ -50,13 +80,17 @@ function rangeToMs(r: string): number {
   return 30 * 60 * 1000
 }
 
-/** 所有范围统一走定时 fetchData()，raw 范围更频繁 */
+/**
+ * 定时刷新间隔，按 Project 规格对齐：
+ * 30m~24h: 秒级 (5s)
+ * 3d~7d:   分钟级 (60s)
+ * 14d~30d: 每 5 分钟 (300s)
+ */
 function refreshInterval(r: string): number {
-  if (['30m', '1h'].includes(r)) return 10_000
-  if (['6h', '24h'].includes(r)) return 15_000
-  if (r === '7d') return 60_000
-  if (r === '30d') return 300_000
-  return 10_000
+  if (['30m', '1h', '6h', '24h'].includes(r)) return 5_000
+  if (['3d', '7d'].includes(r)) return 60_000
+  if (['14d', '30d'].includes(r)) return 300_000
+  return 5_000
 }
 
 let _refreshTimer: ReturnType<typeof setInterval> | null = null
@@ -70,6 +104,9 @@ function startAutoRefresh() {
 function stopAutoRefresh() {
   if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null }
 }
+
+/** 图表是否已完成首次初始化 */
+let _chartInitialized = false
 
 async function fetchData() {
   loading.value = true
@@ -142,76 +179,101 @@ function updateChart() {
     yAxis.push({ type: 'value', name: '%', min: 0, max: 100, splitLine: { show: false } })
   }
 
-  // 固定时间轴窗口：max = 当前时间, min = 当前时间 - 选定范围
+  // 安全尾巴：右边界 = now - tailMargin，避免尚未完成的探测被当作掉点
   const now = Date.now()
   const windowMs = rangeToMs(range.value)
+  const effectiveEnd = now - tailMarginMs.value
+  const effectiveStart = effectiveEnd - windowMs
 
   const xAxisLabelFormat = (() => {
     switch (range.value) {
       case '30m': case '1h': case '6h': return '{HH}:{mm}:{ss}'
       case '24h': return '{HH}:{mm}'
-      case '7d': case '30d': return '{MM}-{dd} {HH}:{mm}'
+      case '3d': case '7d': case '14d': case '30d': return '{MM}-{dd} {HH}:{mm}'
       default: return '{HH}:{mm}:{ss}'
     }
   })()
 
-  chart.value.setOption({
-    tooltip: {
-      trigger: 'axis',
-      formatter: (params: any) => {
-        if (!Array.isArray(params) || !params.length) return ''
-        const time = dayjs(params[0].value[0]).format(
-          range.value === '30d' || range.value === '7d' ? 'MM-DD HH:mm' :
-          range.value === '24h' ? 'HH:mm' : 'HH:mm:ss'
-        )
-        let html = `${time}<br/>`
-        for (const p of params) {
-          const unit = p.seriesName.includes('%') ? '%' : ' ms'
-          const val = p.value[1] != null ? Number(p.value[1]).toFixed(2) : '-'
-          html += `${p.marker} ${p.seriesName}: ${val}${unit}<br/>`
-        }
-        return html
-      },
-    },
-    legend: { bottom: 30 },
-    grid: { left: 60, right: hasLoss ? 60 : 30, top: 30, bottom: 96 },
-    xAxis: {
-      type: 'time',
-      min: now - windowMs,
-      max: now,
-      axisLabel: { formatter: xAxisLabelFormat },
-      boundaryGap: false,
-    },
-    dataZoom: [
-      { type: 'inside', xAxisIndex: 0, filterMode: 'none' },
-      { type: 'slider', xAxisIndex: 0, bottom: 8, height: 20, filterMode: 'none' },
-    ],
-    yAxis,
-    series,
-  }, true)
+  const tooltipFormat = (() => {
+    switch (range.value) {
+      case '30m': case '1h': case '6h': return 'HH:mm:ss'
+      case '24h': return 'HH:mm'
+      case '3d': case '7d': case '14d': case '30d': return 'MM-DD HH:mm'
+      default: return 'HH:mm:ss'
+    }
+  })()
 
-  // 监听 dataZoom 事件以追踪缩放状态
-  chart.value.off('datazoom')
-  chart.value.on('datazoom', () => {
-    const option = chart.value?.getOption() as any
-    if (!option?.dataZoom?.length) return
-    const dz = option.dataZoom[0]
-    isZoomed.value = dz.start !== 0 || dz.end !== 100
-  })
+  if (isZoomed.value && _chartInitialized) {
+    // 缩放态：只更新数据序列，不覆盖 xAxis 和 dataZoom
+    chart.value.setOption({ series })
+  } else {
+    // 非缩放态或首次：完整设置
+    const option: any = {
+      tooltip: {
+        trigger: 'axis',
+        formatter: (params: any) => {
+          if (!Array.isArray(params) || !params.length) return ''
+          const time = dayjs(params[0].value[0]).format(tooltipFormat)
+          let html = `${time}<br/>`
+          for (const p of params) {
+            const unit = p.seriesName.includes('%') ? '%' : ' ms'
+            const val = p.value[1] != null ? Number(p.value[1]).toFixed(2) : '-'
+            html += `${p.marker} ${p.seriesName}: ${val}${unit}<br/>`
+          }
+          return html
+        },
+      },
+      legend: { bottom: 30 },
+      grid: { left: 60, right: hasLoss ? 60 : 30, top: 30, bottom: 96 },
+      xAxis: {
+        type: 'time',
+        min: effectiveStart,
+        max: effectiveEnd,
+        axisLabel: { formatter: xAxisLabelFormat },
+        boundaryGap: false,
+      },
+      dataZoom: [
+        { type: 'inside', xAxisIndex: 0, filterMode: 'none' },
+        { type: 'slider', xAxisIndex: 0, bottom: 8, height: 20, filterMode: 'none' },
+      ],
+      yAxis,
+      series,
+    }
+    chart.value.setOption(option, true)
+    _chartInitialized = true
+
+    // 监听 dataZoom 事件以追踪缩放状态
+    chart.value.off('datazoom')
+    chart.value.on('datazoom', () => {
+      const opt = chart.value?.getOption() as any
+      if (!opt?.dataZoom?.length) return
+      const dz = opt.dataZoom[0]
+      const zoomed = dz.start !== 0 || dz.end !== 100
+      isZoomed.value = zoomed
+      if (zoomed) {
+        zoomStart.value = dz.start
+        zoomEnd.value = dz.end
+      }
+    })
+  }
 }
 
 /** 重置图表缩放到基础视图 */
 function resetZoom() {
   if (!chart.value) return
-  chart.value.dispatchAction({ type: 'dataZoom', start: 0, end: 100 })
   isZoomed.value = false
+  zoomStart.value = 0
+  zoomEnd.value = 100
+  // 强制完整刷新图表（含 xAxis 更新）
+  _chartInitialized = false
+  updateChart()
 }
 
 function handleRealtimeUpdate(data: any) {
   if (data.task_id !== taskId) return
   const result = data.result as ProbeResult
   if (!result) return
-  // 仅 raw 粒度范围允许实时追加，7d/30d 聚合视图不追加秒级点
+  // 仅 raw 粒度范围允许实时追加
   if (!isRawRange.value) return
   points.value.push(result)
   if (points.value.length > 500) points.value.shift()
@@ -239,6 +301,8 @@ onUnmounted(() => {
 })
 
 watch(range, () => {
+  isZoomed.value = false
+  _chartInitialized = false
   fetchData()
   startAutoRefresh()
 })
@@ -270,7 +334,13 @@ watch(range, () => {
       </NGi>
       <NGi>
         <NCard>
-          <NStatistic label="数据点数" :value="stats.total_probes != null && stats.expected_probes != null ? `${stats.total_probes} / ${stats.expected_probes}` : (stats.total_probes ?? '-')" />
+          <NTooltip v-if="dataPointTooltip">
+            <template #trigger>
+              <NStatistic label="数据点数" :value="dataPointLabel" />
+            </template>
+            {{ dataPointTooltip }}
+          </NTooltip>
+          <NStatistic v-else label="数据点数" :value="dataPointLabel" />
         </NCard>
       </NGi>
     </NGrid>

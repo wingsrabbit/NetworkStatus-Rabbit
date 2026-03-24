@@ -2,6 +2,65 @@
 
 ---
 
+## v0.124 (2026-03-24)
+
+### Bug 修复
+
+#### 问题 1：缩放状态在数据刷新时不再被重置
+
+- **文件**：`web/src/views/TaskDetailView.vue`
+- **问题**：用户拖动 `dataZoom` 进入局部区间后，新数据到达或定时刷新会调用 `setOption(..., true)` 整体覆盖图表配置（包括 xAxis min/max 和 dataZoom），导致缩放被强制打回全量视图
+- **修复**：
+  - 新增 `_chartInitialized` 标志和 `zoomStart`/`zoomEnd` 状态变量，记录当前缩放区间
+  - 缩放态下 `updateChart()` 仅更新 `series` 数据（局部 `setOption`，不重建 xAxis/dataZoom），保持用户当前视图不变
+  - 非缩放态或首次渲染时才执行完整 `setOption(..., true)`
+  - `resetZoom()` 重置标志后触发完整刷新；`range` 切换时也重置缩放状态
+
+#### 问题 2：ICMP 探测改为单次模型，与其他协议统一
+
+- **文件**：`agent/probes/icmp_probe.py`
+- **问题**：ICMP 探测写死 `count=4`（Windows `ping -n 4`，Linux `ping -c 4`），单轮探测耗时 3-4 秒，导致 `interval=1` 的任务实际 3-4 秒才出一条结果，与 tcp/udp/http/dns 的"一次调度循环 = 一条基础样本"规则不一致
+- **修复**：
+  - `count` 从 `4` 改为 `1`，每轮只发 1 个 echo request
+  - ICMP 探测耗时降至毫秒级（正常网络），可配合 `interval=1` 实现接近 1Hz 的采样频率
+  - `packet_loss` 变为 0% 或 100%（单包语义），`jitter` 由前端/服务端按窗口内多条结果计算
+
+#### 问题 3：图表右边界增加安全尾巴，消除尾部假性掉点
+
+- **文件**：`web/src/views/TaskDetailView.vue`、`server/api/data.py`
+- **问题**：图表右边界直接对齐 `Date.now()`，导致尚在探测中或未到达超时阈值的样本时段被当作缺失数据，尾部总是像掉点
+- **修复**：
+  - 前端：图表 `effectiveEnd = now - tailMarginMs`，`tailMarginMs` 取自后端返回的 `timeout_seconds`（默认 10 秒），右边界不再贴到当前墙钟
+  - 后端：`/task/<task_id>/stats` 的 `window_end` 改为 `now - timeout`，`expected_probes` 基于有效窗口计算
+  - 图表、统计卡、理论点数三者使用同一套有效窗口，不再互相打架
+
+#### 问题 4：补齐 3d/14d 时间范围 + 按规格对齐刷新节拍
+
+- **文件**：`web/src/views/TaskDetailView.vue`
+- **问题**：前端只有 6 档范围（30m/1h/6h/24h/7d/30d），缺少 Project 6.2/10.3 规定的 `3d` 和 `14d`；刷新间隔是任意轮询（10s/15s/60s/300s），未按规格对齐
+- **修复**：
+  - `rangeOptions` 补齐为 8 档：30m/1h/6h/24h/3d/7d/14d/30d
+  - 刷新节拍按 Project 规格对齐：30m~24h → 5 秒，3d~7d → 60 秒，14d~30d → 300 秒
+  - `xAxisLabelFormat` 和 `tooltipFormat` 为 3d/14d 增加 `MM-dd HH:mm` 格式
+  - 后端 bucket 选择已天然支持（≤24h→raw，≤7d→1m，>7d→1h）
+
+#### 问题 5：数据点数按 bucket 粒度区分理论值 + tooltip 说明
+
+- **文件**：`server/api/data.py`、`web/src/views/TaskDetailView.vue`
+- **问题**：`expected_probes` 始终按原始采样间隔计算，在聚合视图（3d/7d/14d/30d）下理论值不匹配实际桶数，用户把分钟桶数误读成秒级掉点
+- **修复**：
+  - 后端新增 `_get_bucket_type()` 函数，返回 `raw`/`1m`/`1h`
+  - `expected_probes` 按 bucket 粒度计算：raw → `range/interval`，1m → `range/60`，1h → `range/3600`
+  - 前端统计卡显示 `实际 / 理论`，hover 时 tooltip 说明当前粒度（原始样本 / 分钟级聚合桶 / 小时级聚合桶）
+  - `bucket_type` 和 `timeout_seconds` 字段同时返回给前端
+
+### 版本号更新
+
+- `web/package.json` version：`0.123.0` → `0.124.0`
+- `agent/ws_client.py` agent_version：`0.123.0` → `0.124.0`
+
+---
+
 ## v0.123 (2026-03-24)
 
 ### Bug 修复

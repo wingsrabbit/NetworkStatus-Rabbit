@@ -146,14 +146,28 @@ def task_stats(task_id):
     time_range = request.args.get('range', '24h')
     stats = influx_service.query_task_stats(task_id, time_range)
 
-    # Append task interval and window metadata
+    # Append task interval, timeout and window metadata
     from datetime import datetime, timezone, timedelta
     range_seconds = _parse_range_to_seconds(time_range)
+    tail_seconds = task.timeout or 10
     now = datetime.now(timezone.utc)
+    effective_end = now - timedelta(seconds=tail_seconds)
+    effective_start = effective_end - timedelta(seconds=range_seconds)
+
     stats['interval_seconds'] = task.interval
-    stats['window_start'] = (now - timedelta(seconds=range_seconds)).isoformat() + 'Z'
-    stats['window_end'] = now.isoformat() + 'Z'
-    stats['expected_probes'] = range_seconds // task.interval if task.interval else None
+    stats['timeout_seconds'] = task.timeout
+    stats['window_start'] = effective_start.isoformat() + 'Z'
+    stats['window_end'] = effective_end.isoformat() + 'Z'
+
+    # Bucket-aware expected probes
+    bucket_type = _get_bucket_type(time_range)
+    stats['bucket_type'] = bucket_type
+    if bucket_type == 'raw':
+        stats['expected_probes'] = range_seconds // task.interval if task.interval else None
+    elif bucket_type == '1m':
+        stats['expected_probes'] = range_seconds // 60
+    else:  # 1h
+        stats['expected_probes'] = range_seconds // 3600
 
     return jsonify({'stats': stats}), 200
 
@@ -166,3 +180,15 @@ def _parse_range_to_seconds(time_range: str) -> int:
     elif time_range.endswith('d'):
         return int(time_range[:-1]) * 86400
     return 6 * 3600
+
+
+def _get_bucket_type(time_range: str) -> str:
+    """Determine bucket type matching influx_service._select_bucket logic."""
+    seconds = _parse_range_to_seconds(time_range)
+    hours = seconds / 3600
+    if hours <= 24:
+        return 'raw'
+    elif hours <= 7 * 24:
+        return '1m'
+    else:
+        return '1h'

@@ -32,7 +32,8 @@ class ICMPProbe(BaseProbe):
     def probe(self, target: str, port: int = None, timeout: int = 10) -> ProbeResult:
         try:
             is_windows = platform.system() == 'Windows'
-            count = 4
+            # 单次探测：每轮只发 1 个 echo request，与 tcp/udp/http/dns 统一
+            count = 1
             if is_windows:
                 cmd = ['ping', '-n', str(count), '-w', str(timeout * 1000), target]
             else:
