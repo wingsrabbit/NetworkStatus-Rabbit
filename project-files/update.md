@@ -2,6 +2,47 @@
 
 ---
 
+## v0.122 (2026-03-24)
+
+### Bug 修复
+
+#### 问题 1+3：统计卡数据来源统一 — 所有范围以服务端为准
+
+- **文件**：`web/src/views/TaskDetailView.vue`
+- **问题**：原始视图（30m/1h/6h/24h）的统计卡通过前端 `recalcStats()` 从本地 `points.value` 重算，受 500 条裁剪限制影响，与图表当前窗口数据脱节；长周期视图则依赖定时 `fetchData()` 从服务端拉取。两套来源不一致。
+- **修复**：
+  - 移除 `recalcStats()` 函数及其在 `handleRealtimeUpdate()` 中的调用
+  - 所有范围统一通过定时 `fetchData()` 从服务端获取统计和数据，差别仅在刷新频率：30m/1h 每 10 秒、6h/24h 每 15 秒、7d 每 60 秒、30d 每 5 分钟
+  - 实时 WebSocket 推送仅负责图表视觉平滑追加，不再影响统计卡数据
+  - 统计卡始终展示服务端按完整时间窗口计算的结果
+
+#### 问题 2：数据点数语义明确化 + 后端补充窗口元数据
+
+- **文件**：`server/api/data.py`
+- **问题**：`/data/task/<task_id>/stats` 接口仅返回 `total_probes`，缺少任务采样周期、窗口起止时间、理论点数等信息，前端无法准确展示"当前窗口内的实际记录次数"
+- **修复**：
+  - 在 stats 响应中新增 `interval_seconds`（任务采样间隔）、`window_start`、`window_end`（窗口起止时间）、`expected_probes`（理论记录次数 = 窗口时长 / 间隔）
+  - `total_probes` 保留为实际记录次数，前端直接展示
+  - 新增 `_parse_range_to_seconds()` 辅助函数用于窗口计算
+
+#### 问题 4+5：图表框选缩放 + 重置按钮
+
+- **文件**：`web/src/views/TaskDetailView.vue`
+- **问题**：图表无法框选放大查看局部细节，且无法从局部视图返回基础视图
+- **修复**：
+  - 在 ECharts `setOption()` 中新增 `dataZoom` 配置：`inside`（鼠标滚轮/触控缩放）+ `slider`（底部滑动条）
+  - 新增 `isZoomed` 状态变量，通过监听 `datazoom` 事件追踪缩放状态
+  - 在时间范围下拉旁新增"重置缩放"按钮（`NButton`），仅在缩放状态下显示
+  - 点击重置按钮调用 `resetZoom()` 恢复到当前 range 的完整视图
+  - `grid.bottom` 调整为 70px 以容纳滑动条
+
+### 版本号更新
+
+- `web/package.json` version：`0.121.0` → `0.122.0`
+- `agent/ws_client.py` agent_version：`0.121.0` → `0.122.0`
+
+---
+
 ## v0.121 (2026-03-24)
 
 ### 新增功能

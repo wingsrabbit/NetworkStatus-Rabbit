@@ -145,4 +145,24 @@ def task_stats(task_id):
 
     time_range = request.args.get('range', '24h')
     stats = influx_service.query_task_stats(task_id, time_range)
+
+    # Append task interval and window metadata
+    from datetime import datetime, timezone, timedelta
+    range_seconds = _parse_range_to_seconds(time_range)
+    now = datetime.now(timezone.utc)
+    stats['interval_seconds'] = task.interval
+    stats['window_start'] = (now - timedelta(seconds=range_seconds)).isoformat() + 'Z'
+    stats['window_end'] = now.isoformat() + 'Z'
+    stats['expected_probes'] = range_seconds // task.interval if task.interval else None
+
     return jsonify({'stats': stats}), 200
+
+
+def _parse_range_to_seconds(time_range: str) -> int:
+    if time_range.endswith('m'):
+        return int(time_range[:-1]) * 60
+    elif time_range.endswith('h'):
+        return int(time_range[:-1]) * 3600
+    elif time_range.endswith('d'):
+        return int(time_range[:-1]) * 86400
+    return 6 * 3600

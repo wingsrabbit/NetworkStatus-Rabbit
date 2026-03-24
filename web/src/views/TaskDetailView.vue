@@ -2,7 +2,7 @@
 import { onMounted, onUnmounted, ref, watch, shallowRef, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import {
-  NCard, NSpace, NSelect, NStatistic, NGrid, NGi, NSpin, NPageHeader
+  NCard, NSpace, NSelect, NStatistic, NGrid, NGi, NSpin, NPageHeader, NButton
 } from 'naive-ui'
 import * as echarts from 'echarts'
 import dayjs from 'dayjs'
@@ -33,33 +33,13 @@ const rangeOptions = [
 /** 是否使用 raw 粒度（允许实时追加） */
 const isRawRange = computed(() => ['30m', '1h', '6h', '24h'].includes(range.value))
 
+/** 是否处于局部缩放状态 */
+const isZoomed = ref(false)
+
 /** 统一格式化：两位小数 */
 function fmt(val: number | null | undefined): string {
   if (val == null) return '-'
   return val.toFixed(2)
-}
-
-
-/** 从当前 points 重算统计值 */
-function recalcStats() {
-  const pts = points.value
-  if (!pts.length) return
-
-  const latencies = pts.map(p => p.latency).filter((v): v is number => v != null)
-  const losses = pts.map(p => p.packet_loss).filter((v): v is number => v != null)
-  const total = pts.length
-
-  if (latencies.length) {
-    const sorted = [...latencies].sort((a, b) => a - b)
-    const p95Idx = Math.min(Math.floor(sorted.length * 0.95), sorted.length - 1)
-    stats.value = {
-      ...stats.value,
-      avg_latency: sorted.reduce((a, b) => a + b, 0) / sorted.length,
-      p95_latency: sorted[p95Idx],
-      avg_packet_loss: losses.length ? losses.reduce((a, b) => a + b, 0) / losses.length : stats.value.avg_packet_loss,
-      total_probes: total,
-    }
-  }
 }
 
 /** 将 range 字符串转为毫秒数 */
@@ -70,11 +50,13 @@ function rangeToMs(r: string): number {
   return 30 * 60 * 1000
 }
 
-/** 长周期视图定时刷新间隔（ms）：7d=60s, 30d=300s */
-function refreshInterval(r: string): number | null {
+/** 所有范围统一走定时 fetchData()，raw 范围更频繁 */
+function refreshInterval(r: string): number {
+  if (['30m', '1h'].includes(r)) return 10_000
+  if (['6h', '24h'].includes(r)) return 15_000
   if (r === '7d') return 60_000
   if (r === '30d') return 300_000
-  return null
+  return 10_000
 }
 
 let _refreshTimer: ReturnType<typeof setInterval> | null = null
@@ -82,9 +64,7 @@ let _refreshTimer: ReturnType<typeof setInterval> | null = null
 function startAutoRefresh() {
   stopAutoRefresh()
   const interval = refreshInterval(range.value)
-  if (interval) {
-    _refreshTimer = setInterval(() => fetchData(), interval)
-  }
+  _refreshTimer = setInterval(() => fetchData(), interval)
 }
 
 function stopAutoRefresh() {
@@ -196,7 +176,7 @@ function updateChart() {
       },
     },
     legend: { bottom: 0 },
-    grid: { left: 60, right: hasLoss ? 60 : 30, top: 30, bottom: 40 },
+    grid: { left: 60, right: hasLoss ? 60 : 30, top: 30, bottom: 70 },
     xAxis: {
       type: 'time',
       min: now - windowMs,
@@ -204,9 +184,29 @@ function updateChart() {
       axisLabel: { formatter: xAxisLabelFormat },
       boundaryGap: false,
     },
+    dataZoom: [
+      { type: 'inside', xAxisIndex: 0, filterMode: 'none' },
+      { type: 'slider', xAxisIndex: 0, bottom: 24, height: 20, filterMode: 'none' },
+    ],
     yAxis,
     series,
   }, true)
+
+  // 监听 dataZoom 事件以追踪缩放状态
+  chart.value.off('datazoom')
+  chart.value.on('datazoom', () => {
+    const option = chart.value?.getOption() as any
+    if (!option?.dataZoom?.length) return
+    const dz = option.dataZoom[0]
+    isZoomed.value = dz.start !== 0 || dz.end !== 100
+  })
+}
+
+/** 重置图表缩放到基础视图 */
+function resetZoom() {
+  if (!chart.value) return
+  chart.value.dispatchAction({ type: 'dataZoom', start: 0, end: 100 })
+  isZoomed.value = false
 }
 
 function handleRealtimeUpdate(data: any) {
@@ -217,7 +217,7 @@ function handleRealtimeUpdate(data: any) {
   if (!isRawRange.value) return
   points.value.push(result)
   if (points.value.length > 500) points.value.shift()
-  recalcStats()
+  // 统计卡由定时 fetchData() 统一更新，此处仅更新图表
   updateChart()
   ;(window as any).__nsr_markDataReceived?.()
 }
@@ -251,6 +251,7 @@ watch(range, () => {
     <NPageHeader @back="$router.back()" title="任务详情" />
     <NSpace style="margin: 16px 0" align="center">
       <NSelect v-model:value="range" :options="rangeOptions" style="width: 140px" />
+      <NButton v-if="isZoomed" size="small" @click="resetZoom">重置缩放</NButton>
     </NSpace>
 
     <NGrid :x-gap="16" :y-gap="16" cols="2 m:4" responsive="screen" style="margin-bottom: 16px">
