@@ -1,15 +1,25 @@
-"""DNS 查询探测核心 — 基于 Network-Monitoring-Tools/dns_lookup 实现。
+"""DNS 查询探测核心 — 薄包装层，转发到 vendor/Network-Monitoring-Tools/dns_lookup。
 
-参考上游: Network-Monitoring-Tools/dns_lookup/monitor_dns.py
+真实实现来源: agent/vendor/Network-Monitoring-Tools/dns_lookup/monitor_dns.py
 上游函数: resolve_dns_with_server()
 probes/dns_probe.py 作为适配层调用本模块。
 """
-import subprocess
-import shutil
-import re
-import time
+import importlib.util
+import os
 from dataclasses import dataclass
 from typing import Optional
+
+# --- 通过 importlib 加载 vendor 模块 ---
+_VENDOR_DIR = os.path.join(
+    os.path.dirname(__file__), '..', '..', 'vendor',
+    'Network-Monitoring-Tools', 'dns_lookup', 'monitor_dns.py',
+)
+_spec = importlib.util.spec_from_file_location('vendor_dns_lookup', os.path.normpath(_VENDOR_DIR))
+_vendor = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_vendor)
+
+# 上游真实函数引用
+_vendor_resolve_dns = _vendor.resolve_dns_with_server
 
 
 @dataclass
@@ -21,115 +31,29 @@ class DNSProbeResult:
 
 
 def probe(target: str, port: int = None, timeout: int = 10) -> DNSProbeResult:
-    """Execute DNS lookup probe.
-
-    Aligned with upstream resolve_dns_with_server().
-    Uses dig (preferred, same as upstream) with nslookup fallback.
-    """
-    if shutil.which('dig'):
-        return _probe_dig(target, port, timeout)
-    elif shutil.which('nslookup'):
-        return _probe_nslookup(target, port, timeout)
-    else:
-        return DNSProbeResult(success=False, error='Neither dig nor nslookup available')
-
-
-def _probe_dig(target: str, port: int, timeout: int) -> DNSProbeResult:
-    """Use dig command, aligned with upstream resolve_dns_with_server()."""
+    """Execute DNS lookup via vendor resolve_dns_with_server."""
     try:
-        cmd = ['dig', '+short', f'+time={timeout}', '+tries=1', target]
-        if port:
-            cmd.extend(['-p', str(port)])
-
-        start = time.time()
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout + 2
-        )
-        elapsed = (time.time() - start) * 1000
-
-        if result.returncode != 0:
-            return DNSProbeResult(
-                success=False,
-                latency=round(elapsed, 2),
-                error=f'DNS lookup failed: {result.stderr.strip()}'
-            )
-
-        output = result.stdout.strip()
-        if not output:
-            return DNSProbeResult(
-                success=False,
-                latency=round(elapsed, 2),
-                error='DNS lookup returned no results'
-            )
-
-        resolved_ip = _parse_dig_output(output)
-        return DNSProbeResult(
-            success=True,
-            latency=round(elapsed, 2),
-            resolved_ip=resolved_ip,
-        )
-    except subprocess.TimeoutExpired:
-        return DNSProbeResult(success=False, error='DNS lookup timed out')
+        # vendor 函数签名: resolve_dns_with_server(domain, dns_server=None, use_tcp=False)
+        # port 参数在 vendor 中没有直接对应，DNS 默认 53
+        dns_time_str, resolved_ip, status, all_ips = _vendor_resolve_dns(target)
     except Exception as e:
         return DNSProbeResult(success=False, error=str(e))
 
-
-def _probe_nslookup(target: str, port: int, timeout: int) -> DNSProbeResult:
-    """Fallback: use nslookup command."""
+    # 解析延迟值
+    latency = None
     try:
-        cmd = ['nslookup', target]
-        if port:
-            cmd = ['nslookup', f'-port={port}', target]
+        if dns_time_str not in ('N/A', 'ERR'):
+            latency = round(float(dns_time_str), 2)
+    except (ValueError, TypeError):
+        pass
 
-        start = time.time()
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout + 2
-        )
-        elapsed = (time.time() - start) * 1000
+    success = status == 'SUCCESS'
+    error_msg = None if success else status
 
-        if result.returncode != 0:
-            return DNSProbeResult(
-                success=False,
-                latency=round(elapsed, 2),
-                error=f'DNS lookup failed: {result.stderr.strip()}'
-            )
+    return DNSProbeResult(
+        success=success,
+        latency=latency,
+        resolved_ip=resolved_ip if resolved_ip != 'N/A' else None,
+        error=error_msg,
+    )
 
-        resolved_ip = _parse_nslookup_output(result.stdout)
-        return DNSProbeResult(
-            success=True,
-            latency=round(elapsed, 2),
-            resolved_ip=resolved_ip,
-        )
-    except subprocess.TimeoutExpired:
-        return DNSProbeResult(success=False, error='DNS lookup timed out')
-    except Exception as e:
-        return DNSProbeResult(success=False, error=str(e))
-
-
-def _parse_dig_output(output: str) -> Optional[str]:
-    """Parse resolved IP from dig +short output."""
-    for line in output.split('\n'):
-        line = line.strip()
-        if re.match(r'^[\d.]+$', line):
-            return line
-        if re.match(r'^[0-9a-fA-F:]+$', line):
-            return line
-    return output.split('\n')[0].strip() if output else None
-
-
-def _parse_nslookup_output(output: str) -> Optional[str]:
-    """Parse resolved IP from nslookup output."""
-    lines = output.split('\n')
-    in_answer = False
-    for line in lines:
-        if 'Name:' in line:
-            in_answer = True
-            continue
-        if in_answer and 'Address:' in line:
-            m = re.search(r'Address:\s*([\d.]+)', line)
-            if m:
-                return m.group(1)
-            m = re.search(r'Address:\s*([0-9a-fA-F:]+)', line)
-            if m:
-                return m.group(1)
-    return None

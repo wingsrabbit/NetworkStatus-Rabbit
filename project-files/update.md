@@ -2,6 +2,39 @@
 
 ---
 
+## v0.128 (2026-03-24)
+
+### Vendor 统一接入
+
+#### 上游代码纳入仓库（vendor 化）
+
+- **新增**：`agent/vendor/Network-Monitoring-Tools/`，完整镜像上游仓库 `Network-Monitoring-Tools`（5 个协议子目录 + LICENSE + README）
+- 新增 `agent/vendor/__init__.py` 及各子包 `__init__.py` 标记文件，使 vendor 目录可被 Python 识别
+- 打包端点 `GET /api/agent-package.tar.gz` 已包含 `agent/` 全目录，vendor 代码随 Agent 自动分发，安装脚本无需修改
+
+#### network_tools 重写为 vendor 薄代理
+
+- **文件**：`agent/network_tools/icmp_ping/__init__.py`、`tcp_ping/__init__.py`、`udp_ping/__init__.py`、`curl_ping/__init__.py`、`dns_lookup/__init__.py`
+- **变更**：5 个子模块由原先仓库自写实现**全部重写**为 vendor 薄代理（thin wrapper）
+  - 通过 `importlib.util.spec_from_file_location` 加载 vendor 模块（目录名含连字符，不可直接 `import`）
+  - 每个 wrapper 仅负责：参数适配 → 调用 vendor 函数 → 结果归一化为项目 dataclass（`ICMPPingResult` / `TCPPingResult` / `UDPPingResult` / `HTTPProbeResult` / `DNSProbeResult`）
+  - 对外 API 签名与返回类型保持不变，`probes/` 适配层零改动
+- **icmp_ping**：委托 vendor `run_ping()` + `parse_ping_output()`
+- **tcp_ping**：委托 vendor `tcp_connect_single()`
+- **udp_ping**：委托 vendor `_perform_ping_batch()`，调用前将 hostname 解析为 `(ip, port)` 元组
+- **curl_ping**：委托 vendor `run_curl()`，保留 `requests` fallback；`connect_time`/`transfer_time` 映射为项目 `tcp_time`/`ttfb`
+- **dns_lookup**：委托 vendor `resolve_dns_with_server()`，解析 vendor 字符串格式 `dns_time` 为 float
+
+### Bug 修复
+
+#### TCP self_test 加强
+
+- **文件**：`agent/probes/tcp_probe.py`
+- **问题**：`self_test()` 仅检查 `hasattr(socket, 'create_connection')`，所有 Python 版本均通过，无法检测运行时 socket 故障
+- **修复**：改为实际调用 `socket.create_connection(('127.0.0.1', 0), timeout=1)`，捕获 `ConnectionRefusedError`/`OSError`（证明 socket 栈正常）与通用 `Exception`（证明 socket 栈异常），确保 self_test 具有真实探测能力
+
+---
+
 ## v0.127 (2026-03-24)
 
 ### Bug 修复

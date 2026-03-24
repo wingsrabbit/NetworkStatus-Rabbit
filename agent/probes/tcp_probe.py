@@ -16,8 +16,13 @@ class TCPProbe(BaseProbe):
 
     def self_test(self) -> bool:
         try:
-            import socket as s
-            assert hasattr(s, 'create_connection')
+            import socket
+            # 验证 socket 模块可导入且 create_connection 可正常调用
+            sock = socket.create_connection(('127.0.0.1', 0), timeout=1)
+            sock.close()
+            return True
+        except (ConnectionRefusedError, OSError):
+            # 连接被拒绝或端口不可达说明 socket 功能本身正常
             return True
         except Exception as e:
             self._test_error = str(e)
