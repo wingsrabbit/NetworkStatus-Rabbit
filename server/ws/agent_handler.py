@@ -56,12 +56,13 @@ class AgentNamespace(Namespace):
         """Map colon-delimited event names to underscore handler methods.
         e.g. 'agent:auth' -> on_agent_auth()
         Only intercept events containing ':', let connect/disconnect go through parent.
+        Strips sid from args following flask_socketio convention.
         """
         if ':' in event:
             handler_name = 'on_' + event.replace(':', '_')
             handler = getattr(self, handler_name, None)
             if handler:
-                return handler(*args)
+                return handler(*args[1:])
         return super().trigger_event(event, *args)
 
     def on_connect(self):
