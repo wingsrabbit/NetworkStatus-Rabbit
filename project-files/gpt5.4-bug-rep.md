@@ -2,7 +2,7 @@
 
 任务名称：debug NetworkStatus-Rabbit
 
-当前文档版本：v0.124
+当前文档版本：v0.125
 
 最后整理时间：2026-03-24
 
@@ -16,78 +16,70 @@
 
 ## 1. 当前状态
 
-### v0.124 当前问题
+### v0.125 当前问题
 
-1. 图表发生数据更新时会重置缩放状态，局部查看被强行打回全量视图。
-现象：用户手动拖动 `dataZoom` 进入局部区间后，只要有新数据到达或页面定时刷新，缩放就被重置。这会让详情页在观察某个异常片段时几乎不可用。
+1. `icmp` 改成单次探测后，抖动字段在当前实现里被直接做没了，详情页自然不会再显示抖动。
+现象：你给的截图里 `icmp` 延迟波动非常明显，但详情页抖动指标消失了。这不是图表没画，而是后端已经不给抖动值了。
 代码依据：
-1. [web/src/views/TaskDetailView.vue](web/src/views/TaskDetailView.vue) 的 `updateChart()` 每次都会重新计算 `now = Date.now()`，然后把 `xAxis.min/max` 重设为 `now - windowMs` 与 `now`。
-2. 同一处调用 `chart.value.setOption(..., true)`，第二个参数是 `notMerge=true`，会把现有的 `dataZoom` 状态整体覆盖掉。
-3. 当前页面只维护了 `isZoomed` 布尔值，没有真正记录用户当前缩放区间，例如 `startValue/endValue` 或可见时间窗。
+1. [agent/probes/icmp_probe.py](agent/probes/icmp_probe.py) 当前 `probe()` 已经被改成 `count = 1`，每轮只发 1 个 echo request。
+2. 同文件的 `_parse_jitter()` 只会解析 Linux `ping` 多包输出里的 `mdev`，正则目标是 `rtt min/avg/max/mdev = ...`。单次 ping 不会产生这段统计，Windows 也没有对应分支，所以当前实现下 `jitter` 基本恒为 `None`。
+3. [web/src/views/TaskDetailView.vue](web/src/views/TaskDetailView.vue) 只有在 `points` 里存在非空 `jitter` 时才会追加“抖动 (ms)”序列；因此上游一旦全是 `None`，前端就会像“抖动功能消失”一样。
+4. [project-files/PROJECT.md](project-files/PROJECT.md) 的 6.1 和 10.4 明确把 `jitter` 定义为 `icmp` 指标之一，详情页也明确要求 `ICMP Ping` 展示抖动折线图。
 实现思路：
-1. 不要在每次刷新时用 `notMerge=true` 整体重建图表；更新数据序列时应优先走局部 `setOption` 合并。
-2. 在 `datazoom` 事件里记录真实可见区间，至少保存 `startValue/endValue`，而不是只保存一个布尔值。
-3. 当用户处于缩放态时，实时更新只能更新 `series.data`，不能覆盖 `xAxis.min/max`；只有用户点击“重置缩放”或切换 range 时，才恢复基础窗口。
-4. 如果要兼顾“原始窗口继续向前推进”和“用户局部观察不被打断”，可以维护两套窗口：基础窗口持续滑动，当前可见窗口在缩放态下冻结，退出缩放后再回到基础窗口。
-影响：目前详情页的缩放功能名义上存在，但一旦有实时数据就失效，无法支撑对异常片段进行持续观察。
-验收标准：缩放后即便新数据到达、stats 刷新或定时拉取发生，图表仍保持用户当前局部视图；只有手动重置或切换 range 才回到全量窗口。
+1. 既然 `icmp` 现在采用“单次调度 = 一条基础样本”，抖动就不能再依赖操作系统 ping 的多包汇总输出，而应改成基于最近 N 条 `latency` 在窗口内计算，例如服务端 rolling jitter 或前端窗口内抖动。
+2. 如果继续在 agent 端出 `jitter`，也必须由 agent 自己维护每个任务最近若干次 `latency` 的滑动窗口，再把窗口计算结果塞进当前样本，而不是继续从单条 ping 输出里硬解析。
+3. 在新计算逻辑上线前，前端至少应明确区分“当前协议无抖动字段”和“抖动值暂不可用”，避免用户误判为链路稳定。
+决定方向：按 Project 的展示语义和你这轮确认，`icmp jitter` 一律由前端基于最近 10 个 `latency` 点计算，不在 agent 单条样本里产出 `jitter`。前端必须把该值明确定义为“窗口抖动”，并在 tooltip 与统计卡中统一使用同一套 10 点窗口结果。
+影响：目前 `icmp` 的抖动图和抖动语义实际失效，用户会被误导成“只有延迟，没有抖动”。
+验收标准：`icmp` 任务在存在延迟波动时，详情页能够稳定显示抖动值和抖动曲线；不能再因为单次 ping 模式而把抖动整项做没。
 
-2. `icmp` 的“1 秒任务却 3 到 4 秒才更新一次”不是前端问题，而是 probe 实现本身和 `tcp` 不是同一种采样语义。
-现象：`tcp` 测试可以做到接近 1 秒 1 条，但 `icmp` 在同样配置下变成 3 到 4 秒才出 1 条结果，看起来像链路更新模块坏了，实际是协议实现不一致。
+2. Agent 当前并没有按 Project 11.4 集成 Network-Monitoring-Tools-web 作为探测核心，现有多协议实现是简化自写版本，`udp` 问题只是最明显的外显症状。
+现象：你指出的 `udp 4ms`、无丢包、无抖动只是当前探测核心偏离 Project 的直接结果之一。继续往下检查后，已经可以确认目前 agent 并没有按工程文档把 Network-Monitoring-Tools-web 放进 `agent/network_tools/` 作为底层探测核心。
 代码依据：
-1. [agent/scheduler.py](agent/scheduler.py) 当前 `_task_loop()` 已经是固定节拍模型：`next_run += interval` 后按剩余时间等待，所以“执行完再睡 interval”的老问题在当前代码里已经不是主因。
-2. [agent/probes/tcp_probe.py](agent/probes/tcp_probe.py) 每轮只做一次 `socket.create_connection()`，一次任务循环产出一条结果。
-3. [agent/probes/icmp_probe.py](agent/probes/icmp_probe.py) 当前却写死了 `count = 4`，Windows 走 `ping -n 4`，Linux 走 `ping -c 4`。这意味着一次“ICMP 探测结果”内部其实包含 4 个 ping 子样本，Windows 默认子样本之间还会有约 1 秒间隔，所以单轮天然会拖到 3 到 4 秒。
-4. [agent/probes/udp_probe.py](agent/probes/udp_probe.py)、[agent/probes/http_probe.py](agent/probes/http_probe.py)、[agent/probes/dns_probe.py](agent/probes/dns_probe.py) 当前都属于“一轮任务做一次探测并回一条结果”的模式；所谓 `ssl` 在当前代码里并不是独立协议，而是 [agent/probes/http_probe.py](agent/probes/http_probe.py) 中 `https` URL 的同一条请求链路。
+1. [project-files/PROJECT.md](project-files/PROJECT.md) 的 11.4 明确写死：`agent/` 下应存在 `network_tools/` 目录，`probes/*.py` 只是适配层，用来包装 Network-Monitoring-Tools 的原始实现。
+2. 实际目录 [agent](agent) 下只有 `config.py`、`local_cache.py`、`main.py`、`probes/`、`scheduler.py`、`ws_client.py`，不存在 Project 里要求的 [agent/network_tools](agent) 这一层原始探测代码目录。
+3. [agent/probes/__init__.py](agent/probes/__init__.py) 只是直接导入当前自写的 `icmp_probe.py`、`tcp_probe.py`、`udp_probe.py`、`http_probe.py`、`dns_probe.py`，没有任何对 Network-Monitoring-Tools-web 的包装入口。
+4. [agent/main.py](agent/main.py) 启动链路里也只会初始化本仓库自己的 probe registry，没有加载外部 network tools 代码。
+5. [requirements-agent.txt](requirements-agent.txt) 中也看不到任何为 Network-Monitoring-Tools-web 集成准备的本地包/模块依赖，说明当前 agent 运行时并未把那套工具当作第一探测核心。
+6. 最直接的协议偏差体现在 [agent/probes/udp_probe.py](agent/probes/udp_probe.py)：它当前只是执行 `nc -u -z -w timeout target port`，然后把命令耗时当成 `latency`，并且完全不返回 `packet_loss` / `jitter`。这与外部仓库文档中 UDP 客户端“发送多包、接收回显、计算 RTT/丢包/抖动”的定义完全不同。
+7. 从外部文档与源码可见，`wingsrabbit/Network-Monitoring-Tools-web` 的 UDP 工具明确提供服务端/客户端模型，以及批量 RTT、丢包、抖动计算，不是当前这个 `nc` 检查模式。
 实现思路：
-1. 如果产品语义要求“任务 interval=1 就应接近每秒 1 条结果”，那 `icmp` 不能继续保留 `count=4` 的批量 ping 语义，应改成和 `tcp/udp/http/dns` 一样的单次探测模型，即每轮只发 1 个 echo request。
-2. `icmp` 现有的 `packet_loss` 和 `jitter` 不能再靠“一次命令里打 4 个包”来算，应该改成基于最近 N 条单次结果在服务端或前端窗口内再计算。否则 `icmp` 会永远和其他协议不在一个节拍体系里。
-3. `udp/http(dns/tls)/dns` 不需要“抄 tcp 模块”，因为它们本来就是单次采样；真正要统一的是“每个任务循环只产出一条基础样本”的设计约束。
-影响：当前 `icmp` 的结果频率、数据点数、丢包/抖动语义都和其他协议不一致，用户会误以为只有 `icmp` 有更新故障。
-验收标准：`interval=1` 的 `icmp` 任务在正常网络下应接近 1 秒 1 条结果；各协议统一遵守“一次调度循环 = 一条基础样本”的规则。
+1. 需要先把“探测核心”这件事定死：是继续维护当前这套简化 probe，还是回到 Project 规定的 Network-Monitoring-Tools-web 包装模式。
+2. 如果按 Project 走，`agent/network_tools/` 应补齐并作为正式底层；`icmp/tcp/udp/http/dns` 的 `*_probe.py` 只负责参数适配和结果归一化。
+3. `udp` 应优先迁回外部工具的 client/server 回显模型，否则就算前端补图，指标仍然没有物理意义。
+4. 在正式迁回之前，当前 `udp` 至少应从“可信监测协议”降级为“实验性/未达标实现”，避免继续误导判断。
+决定方向：以 Project 11.4 为准，Agent 必须补齐 `agent/network_tools/` 并以 Network-Monitoring-Tools-web 作为正式探测核心；当前自写 `probes/*.py` 只允许作为适配层，不允许继续承担实际探测核心职责。UDP 协议必须回到外部工具定义的 client/server 回显测量模型，不再允许使用 `nc -u -z` 作为正式实现。
+影响：这不是单一 UDP bug，而是 agent 探测层整体实现偏离工程文档，后续任何协议指标都可能继续出现“看起来有数，实际语义不对”的问题。
+验收标准：仓库结构、agent 启动链路、各协议 probe 的实现方式与 Project 11.4 一致；特别是 UDP 必须回到可计算 RTT/丢包/抖动的真实探测模型。
 
-3. 当前时间窗口直接贴着 `now` 画到最右侧，没有给探测完成和超时判定预留会合区，天然会制造“最后几秒像丢点”的假象。
-现象：页面当前把最右边界直接对齐当前时间，导致最近几秒内那些“还在探测中”或“尚未到达超时阈值”的样本也被视作窗口内应出现的数据。用户看到的效果就是尾部像缺点、掉点，统计也会被误读。
+3. 任务编辑接口存在“先提交数据库，再做后续动作”的事务边界错误，导致接口报错时数据可能已经部分落库。
+现象：你在编辑任务时会收到“服务器内部错误”，操作看起来失败；但刷新后台后，面板又显示某些内容已经变更。这说明“响应失败”和“数据是否已写入”当前不是同一个结果。
 代码依据：
-1. [web/src/views/TaskDetailView.vue](web/src/views/TaskDetailView.vue) 当前 `updateChart()` 固定使用 `xAxis.max = Date.now()`，没有任何安全尾巴。
-2. [server/api/data.py](server/api/data.py) 当前 `task_stats()` 计算 `window_end` 和 `expected_probes` 也是直接用 `now`，没有考虑任务 `timeout` 或数据会合延迟。
-3. [project-files/PROJECT.md](project-files/PROJECT.md) 的任务模型里 `timeout` 明确定义为探测超时时间；在这个语义下，尾部未完成样本在超时前本来就不应被当作“缺失结果”。
+1. [server/api/tasks.py](server/api/tasks.py) 的 `update_task()` 先把 `task` 字段写进 SQLAlchemy session，然后调用 `task_service.increment_config_version(task.source_node_id)`。
+2. [server/services/task_service.py](server/services/task_service.py) 的 `increment_config_version()` 内部自己执行了一次 `db.session.commit()`。由于它和 `update_task()` 共用同一个 session，这次 commit 会把当前任务修改一并提前落库。
+3. `update_task()` 在这之后还会继续执行 `_notify_agent_task_change(...)`。如果通知阶段抛异常，接口就会返回 500，但数据库里的任务修改已经被前面的 commit 提交了。
+4. 同样的结构也出现在 [server/api/tasks.py](server/api/tasks.py) 的 `create_task()`、`delete_task()`、`toggle_task()`，都存在“持久化与后续动作不在同一事务语义里”的风险。
 实现思路：
-1. 详情页的展示窗口右边界不应直接取当前墙钟时间，而应取“当前时间减去安全尾巴”。按你举的例子，当前更合理的是把尾巴至少设为任务 `timeout` 秒，默认就是 10 秒；如果只写死 5 秒，会和“超过 10 秒才算超时”这条规则冲突。
-2. 前端图表、顶部统计、`expected_probes` 的理论计数都应使用同一套 `effective_window_end`，否则图表和统计会互相打架。
-3. 原始视图下新结果可以先进本地 buffer，等其时间戳进入“可见窗口”后再并入图表，这就是允许数据会合，而不是把还没结束的采样硬算成丢失。
-影响：如果不做安全尾巴，最近一段时间的曲线和数据点数永远偏小，用户会把“尚未完成”误认成“系统漏写”或“探测失败”。
-验收标准：当当前时间为 13:58:00 时，图表与统计的最右边界不直接落在 13:58:00，而是落在统一定义的安全会合点；尾部不再因为尚未完成的探测而表现成假性掉点。
+1. `increment_config_version()` 不应在 service 内部偷偷 commit；它应只修改 node 对象，把事务提交权交回调用方。
+2. `tasks.py` 应把“任务变更 + config_version 递增”作为一次明确的数据库事务处理，成功后再做 websocket 通知；通知失败也不应伪装成数据库失败，而应返回“保存成功但下发失败/待重试”的明确信号。
+3. 如果坚持在通知失败时返回错误，也必须在响应语义上明确这是“下发失败”而不是“保存失败”，否则前端必然误判。
+决定方向：以 Project 的状态机和同步语义为准，任务编辑接口必须把“数据库保存成功”和“agent 下发成功”拆成两个明确状态。HTTP 响应主语义只表达数据库保存是否成功；若下发失败，响应中必须返回明确的 `sync_pending` 或 `sync_failed` 状态，不再允许使用 500 混淆为“保存失败”。
+影响：现在的错误提示不可信，用户看到 500 并不能判断到底是没保存、部分保存，还是保存成功但同步失败。
+验收标准：编辑接口返回失败时，前后端对“数据有没有落库”必须有一致语义；不能再出现“接口报错但刷新后已改”的情况。
 
-4. 时间范围与刷新粒度没有按 Project 6.2 和 10.3 实现，前端目前少了 `3d`、`14d`，刷新节拍也不是按秒/分钟/小时边界对齐。
-现象：用户现在明确要求的范围是：`30m`、`1h`、`6h`、`24h`、`3d`、`7d`、`14d`、`30d`。但当前详情页只有 `30m/1h/6h/24h/7d/30d`，少了 `3d` 和 `14d`。同时，刷新节奏现在是 `10s/15s/60s/300s` 这种任意轮询，不是“30 分钟到 24 小时按秒、3 天到 7 天按分钟、14 天到 30 天按小时”的规格。
+4. 任务编辑前后端契约不一致，前端允许修改一批字段，但后端更新接口实际上只会保存其中一小部分。
+现象：编辑弹窗里可以修改源节点、协议、目标类型、目标地址、目标节点等核心字段，但当前后端 `PUT /tasks/<id>` 并不会真正更新这些字段。用户从 UI 视角看是在“编辑整个任务”，从后端视角看却只是“改一小部分字段”。
 代码依据：
-1. [project-files/PROJECT.md](project-files/PROJECT.md) 的 6.2 已经写死 bucket 语义：`24h -> raw`，`3d/7d -> agg_1m`，`14d/30d -> agg_1h`。
-2. [project-files/PROJECT.md](project-files/PROJECT.md) 的 10.3 布局描述里也明确列出了 `3d` 与 `14d` 两档范围。
-3. [web/src/views/TaskDetailView.vue](web/src/views/TaskDetailView.vue) 现在 `rangeOptions` 缺少 `3d`、`14d`；`refreshInterval()` 仍然返回 `10_000/15_000/60_000/300_000`；`xAxisLabelFormat` 也没有为 `3d`、`14d` 单独定义粒度。
-4. [server/services/influx_service.py](server/services/influx_service.py) 的 `_select_bucket()` 实际已经支持这两档区间：`<=24h` 走 raw，`<=7d` 走 1m，其他走 1h。也就是说后端 bucket 选择大体够用，主要缺口在前端范围与刷新策略。
+1. [web/src/views/admin/TasksView.vue](web/src/views/admin/TasksView.vue) 的编辑弹窗会把整个 `task` 拷进 `form`，并允许修改 `source_node_id`、`protocol`、`target_type`、`target_node_id`、`target_address`、`target_port`、`interval`、`timeout` 等完整字段集。
+2. 但 [server/api/tasks.py](server/api/tasks.py) 的 `update_task()` 实际只处理 `interval`，以及 `name`、`timeout`、`target_port` 和各类告警字段。它不会更新 `source_node_id`、`protocol`、`target_type`、`target_node_id`、`target_address`。
+3. 这意味着即使接口返回 200，用户对这些核心字段的修改也可能根本没落库；而当它与上一个问题叠加时，就会出现更混乱的“部分字段变了、部分字段没变、响应还报错”的体验。
 实现思路：
-1. 前端 range 选项应补齐为 8 档：`30m/1h/6h/24h/3d/7d/14d/30d`。
-2. 刷新逻辑不要再用随意的固定轮询，而应改成“对齐边界”的调度：
-	- `30m ~ 24h`：按秒边界刷新；
-	- `3d ~ 7d`：按分钟边界刷新；
-	- `14d ~ 30d`：按小时边界刷新。
-3. range 切换后，图表标签格式、tooltip 时间格式、理论点数计算、bucket 选择都要跟着统一切换。
-4. 原始视图仍可继续吃 websocket 增量，但秒级视图的整页重算也应落在秒边界，而不是任意时刻触发。
-影响：当前实现和工程规格脱节，用户看到的不是“bucket 粒度视图”，而是“不稳定轮询 + 缺失范围”的混合行为。
-验收标准：详情页范围完整支持 8 档；`30m~24h` 视图以秒为刷新节点，`3d~7d` 以分钟为刷新节点，`14d~30d` 以小时为刷新节点；bucket 选择与 Project 6.2 一致。
-
-5. `数据点数` 需要从“原始 total_probes”升级为“实际记录数 / 理论记录数（基于有效窗口）”，否则无法判断是正常会合、协议语义差异，还是实际掉点。
-现象：现在页面虽然已经显示 `total_probes / expected_probes`，但这个理论值还是按“当前时间直达右边界”的旧窗口算出来的，一旦引入安全尾巴或新增 `3d/14d` 粒度，这个数字就会继续失真。
-代码依据：
-1. [server/api/data.py](server/api/data.py) 当前 `expected_probes = range_seconds // task.interval`，它没有使用“有效窗口终点”，也没有区分聚合 bucket 下的分钟级/小时级统计语义。
-2. [web/src/views/TaskDetailView.vue](web/src/views/TaskDetailView.vue) 当前虽然展示了 `stats.total_probes / stats.expected_probes`，但没有告诉用户理论值是按什么窗口、什么粒度算的。
-实现思路：
-1. 原始视图下，理论记录数应基于“有效窗口长度 / task.interval”计算，窗口终点取会合后的 `effective_window_end`。
-2. 聚合视图下，不应再沿用“按探测 interval 算理论秒级点数”的展示，而应明确展示“已聚合桶数 / 理论桶数”，否则 `3d/7d/14d/30d` 会把 bucket 语义和原始样本语义混在一起。
-3. 详情页文案建议明确区分：`原始样本数`、`理论样本数`、`聚合桶数`，避免用户把分钟桶数误读成秒级掉点。
-影响：如果不重定义这个指标，后续即便补了会合区和新 range，页面仍然会不断制造“少点了”的误报。
-验收标准：不同范围下的数据点指标都能解释清楚“为什么是这个数”，用户能分辨当前看到的是原始样本缺失、聚合桶数量，还是正常会合延迟。
+1. 要么把后端更新接口补齐成真正支持这些字段的完整编辑，并补充对应校验和 agent 重下发逻辑。
+2. 要么前端在编辑模式里把这些不支持变更的字段明确禁用，只允许修改当前后端真正支持的字段。
+3. 无论选哪条路，都必须把“可编辑字段集合”写死在前后端同一份契约里，不能再由前端自行猜测。
+决定方向：以当前 Project 和现有后端能力为准，前端编辑页必须立即禁用所有后端 `PUT /tasks/<id>` 未支持的字段，只保留 `name`、`interval`、`timeout`、`target_port` 与告警参数可编辑。任何未被后端正式支持的字段，不允许继续显示为可编辑状态。
+影响：当前管理页不是单纯的 UI bug，而是接口能力边界没锁死，AI 和人工都会被误导。
+验收标准：编辑页面里能改的字段，后端就必须真实支持；后端不支持的字段，前端不能再给出可编辑假象。
 
 ---
 
@@ -118,6 +110,27 @@
 7. 页面已补充“重置缩放”按钮，可从局部详细视图返回基础视图。
 
 验收结果：已完成，后续不再作为“现状问题”重复列出。
+
+### v0.122 已完成
+
+本版本已完成的事项：
+
+1. 报告结构从“长篇堆叠问题清单”收敛为“当前状态 / 已完成任务”两段式，避免已解决问题持续污染现状判断。
+2. 问题项写法统一成“现象、代码依据、实现思路”的固定结构，不再保留泛化建议或模板化废话。
+3. 当前版本只保留未解决问题，已确认完成的历史问题不再重复回放全文。
+
+验收结果：已完成，后续继续沿用该文档组织方式。
+
+### v0.123 已完成
+
+本版本已完成的事项：
+
+1. 后端 [server/api/data.py](server/api/data.py) 的任务统计接口已补充 `interval_seconds`、`window_start`、`window_end`、`expected_probes`，为理论点数和窗口语义提供基础元数据。
+2. 前端 [web/src/views/TaskDetailView.vue](web/src/views/TaskDetailView.vue) 已开始展示 `实际记录数 / 理论记录数` 的基础形态，不再只显示单一 `total_probes`。
+3. Agent 调度器 [agent/scheduler.py](agent/scheduler.py) 已切换为固定节拍模型，不再是旧版“探测完成后再 sleep interval”的串行漂移写法。
+4. `v0.123` 对应的当前问题已经完成一次代码复查，旧判断中“调度器是唯一主因”的表述已被修正，不再作为现状结论继续保留。
+
+验收结果：已完成，后续在此基础上继续追查协议实现和窗口语义问题。
 
 ---
 

@@ -113,10 +113,13 @@ def create_task():
 
     db.session.commit()
 
-    # Notify agent via WebSocket
-    _notify_agent_task_change(source_node_id, 'center_task_assign', task, new_version)
+    # Notify agent via WebSocket — failure does not affect DB save
+    sync_ok = _try_notify_agent(source_node_id, 'center_task_assign', task, new_version)
 
-    return jsonify({'task': task.to_dict()}), 201
+    resp = {'task': task.to_dict()}
+    if not sync_ok:
+        resp['sync_status'] = 'pending'
+    return jsonify(resp), 201
 
 
 @tasks_bp.route('/<task_id>', methods=['PUT'])
@@ -151,9 +154,13 @@ def update_task(task_id):
     new_version = task_service.increment_config_version(task.source_node_id)
     db.session.commit()
 
-    _notify_agent_task_change(task.source_node_id, 'center_task_update', task, new_version)
+    # Notify agent via WebSocket — failure does not affect DB save
+    sync_ok = _try_notify_agent(task.source_node_id, 'center_task_update', task, new_version)
 
-    return jsonify({'task': task.to_dict()}), 200
+    resp = {'task': task.to_dict()}
+    if not sync_ok:
+        resp['sync_status'] = 'pending'
+    return jsonify(resp), 200
 
 
 @tasks_bp.route('/<task_id>', methods=['DELETE'])
@@ -170,17 +177,24 @@ def delete_task(task_id):
     new_version = task_service.increment_config_version(source_node_id)
     db.session.commit()
 
-    # Notify agent
-    from server.services.node_service import get_connection_sid
-    from server.extensions import socketio
-    sid = get_connection_sid(source_node_id)
-    if sid:
-        socketio.emit('center_task_remove', {
-            'task_id': task_id_copy,
-            'config_version': new_version
-        }, to=sid, namespace='/agent')
+    # Notify agent — failure does not affect DB save
+    sync_ok = True
+    try:
+        from server.services.node_service import get_connection_sid
+        from server.extensions import socketio
+        sid = get_connection_sid(source_node_id)
+        if sid:
+            socketio.emit('center_task_remove', {
+                'task_id': task_id_copy,
+                'config_version': new_version
+            }, to=sid, namespace='/agent')
+    except Exception:
+        sync_ok = False
 
-    return jsonify({'message': '任务已删除'}), 200
+    resp = {'message': '任务已删除'}
+    if not sync_ok:
+        resp['sync_status'] = 'pending'
+    return jsonify(resp), 200
 
 
 @tasks_bp.route('/<task_id>/toggle', methods=['PUT'])
@@ -198,25 +212,33 @@ def toggle_task(task_id):
     new_version = task_service.increment_config_version(task.source_node_id)
     db.session.commit()
 
-    _notify_agent_task_change(task.source_node_id, 'center_task_update', task, new_version)
+    # Notify agent via WebSocket — failure does not affect DB save
+    sync_ok = _try_notify_agent(task.source_node_id, 'center_task_update', task, new_version)
 
-    return jsonify({
+    resp = {
         'task': {
             'id': task.id,
             'name': task.name,
             'enabled': task.enabled,
         }
-    }), 200
+    }
+    if not sync_ok:
+        resp['sync_status'] = 'pending'
+    return jsonify(resp), 200
 
 
-def _notify_agent_task_change(node_id, event, task, config_version):
-    """Notify connected agent about task changes."""
-    from server.services.node_service import get_connection_sid
-    from server.extensions import socketio
-    sid = get_connection_sid(node_id)
-    if sid:
-        payload = task.to_agent_dict()
-        payload['config_version'] = config_version
-        if event == 'center_task_update':
-            payload['changes'] = payload  # Include all current values
-        socketio.emit(event, payload, to=sid, namespace='/agent')
+def _try_notify_agent(node_id, event, task, config_version) -> bool:
+    """Notify connected agent about task changes. Returns True on success."""
+    try:
+        from server.services.node_service import get_connection_sid
+        from server.extensions import socketio
+        sid = get_connection_sid(node_id)
+        if sid:
+            payload = task.to_agent_dict()
+            payload['config_version'] = config_version
+            if event == 'center_task_update':
+                payload['changes'] = payload  # Include all current values
+            socketio.emit(event, payload, to=sid, namespace='/agent')
+        return True
+    except Exception:
+        return False

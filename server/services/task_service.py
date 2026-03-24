@@ -29,11 +29,14 @@ def get_tasks_for_node(node_id):
 
 
 def increment_config_version(node_id):
-    """Increment the config_version for a node."""
+    """Increment the config_version for a node.
+
+    Only modifies the node object in the current session.
+    The caller is responsible for committing the transaction.
+    """
     node = db.session.get(Node, node_id)
     if node:
         node.config_version += 1
-        db.session.commit()
         return node.config_version
     return None
 

@@ -54,6 +54,43 @@ function fmt(val: number | null | undefined): string {
   return val.toFixed(2)
 }
 
+/**
+ * 基于最近 N 个 latency 点计算窗口抖动（标准差）。
+ * 对每个点 i，取 [i-WINDOW+1, i] 范围内的有效 latency 计算 stdev。
+ * 返回与 points 等长的数组，不足窗口大小的位置为 null。
+ */
+const JITTER_WINDOW = 10
+
+function computeWindowJitter(pts: ProbeResult[]): (number | null)[] {
+  const result: (number | null)[] = []
+  for (let i = 0; i < pts.length; i++) {
+    if (i < JITTER_WINDOW - 1) {
+      result.push(null)
+      continue
+    }
+    const window: number[] = []
+    for (let j = i - JITTER_WINDOW + 1; j <= i; j++) {
+      const lat = pts[j].latency
+      if (lat != null) window.push(lat)
+    }
+    if (window.length < 2) {
+      result.push(null)
+      continue
+    }
+    const mean = window.reduce((a, b) => a + b, 0) / window.length
+    const variance = window.reduce((a, b) => a + (b - mean) ** 2, 0) / window.length
+    result.push(Math.sqrt(variance))
+  }
+  return result
+}
+
+/** 全部点的平均窗口抖动（用于统计卡） */
+const avgWindowJitter = computed(() => {
+  const jitterVals = computeWindowJitter(points.value).filter((v): v is number => v != null)
+  if (jitterVals.length === 0) return null
+  return jitterVals.reduce((a, b) => a + b, 0) / jitterVals.length
+})
+
 /** 数据点数展示文案 */
 const dataPointLabel = computed(() => {
   const s = stats.value
@@ -128,7 +165,17 @@ function updateChart() {
 
   const latencies = points.value.map((p) => [p.timestamp, p.latency])
   const losses = points.value.map((p) => [p.timestamp, p.packet_loss])
-  const jitters = points.value.map((p) => [p.timestamp, p.jitter])
+
+  // jitter：优先使用后端返回值，若全为 null 则回退到前端 10 点窗口计算
+  const backendJitters = points.value.map((p) => p.jitter)
+  const hasBackendJitter = backendJitters.some((v) => v != null)
+  let jitters: [any, number | null][]
+  if (hasBackendJitter) {
+    jitters = points.value.map((p) => [p.timestamp, p.jitter])
+  } else {
+    const windowJitters = computeWindowJitter(points.value)
+    jitters = points.value.map((p, i) => [p.timestamp, windowJitters[i]])
+  }
 
   const series: any[] = [
     {
@@ -158,11 +205,10 @@ function updateChart() {
     })
   }
 
-  const rawJitters = points.value.map((p) => p.jitter)
-  const hasJitter = rawJitters.some((v) => v != null)
+  const hasJitter = jitters.some(([, v]) => v != null)
   if (hasJitter) {
     series.push({
-      name: '抖动 (ms)',
+      name: '窗口抖动 (ms)',
       type: 'line',
       data: jitters,
       smooth: true,
@@ -316,7 +362,7 @@ watch(range, () => {
       <NButton v-if="isZoomed" size="small" @click="resetZoom">重置缩放</NButton>
     </NSpace>
 
-    <NGrid :x-gap="16" :y-gap="16" cols="2 m:4" responsive="screen" style="margin-bottom: 16px">
+    <NGrid :x-gap="16" :y-gap="16" cols="2 m:5" responsive="screen" style="margin-bottom: 16px">
       <NGi>
         <NCard>
           <NStatistic label="平均延迟" :value="stats.avg_latency != null ? `${fmt(stats.avg_latency)} ms` : '-'" />
@@ -325,6 +371,16 @@ watch(range, () => {
       <NGi>
         <NCard>
           <NStatistic label="P95 延迟" :value="stats.p95_latency != null ? `${fmt(stats.p95_latency)} ms` : '-'" />
+        </NCard>
+      </NGi>
+      <NGi>
+        <NCard>
+          <NTooltip>
+            <template #trigger>
+              <NStatistic label="窗口抖动" :value="avgWindowJitter != null ? `${fmt(avgWindowJitter)} ms` : '-'" />
+            </template>
+            基于最近 {{ JITTER_WINDOW }} 个延迟样本的标准差
+          </NTooltip>
         </NCard>
       </NGi>
       <NGi>

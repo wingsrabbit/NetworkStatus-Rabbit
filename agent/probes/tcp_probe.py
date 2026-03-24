@@ -1,9 +1,8 @@
-"""TCP Ping probe plugin."""
-import socket
-import time
+"""TCP Ping probe plugin — adapter wrapping network_tools.tcp_ping (Project 11.4)."""
 import logging
 
 from agent.probes.base import BaseProbe, ProbeResult, register_probe
+from agent.network_tools.tcp_ping import ping as tcp_ping
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +13,6 @@ class TCPProbe(BaseProbe):
         return 'tcp'
 
     def self_test(self) -> bool:
-        """Check Python socket module is available and create_connection callable."""
         try:
             import socket as s
             assert hasattr(s, 'create_connection')
@@ -27,26 +25,13 @@ class TCPProbe(BaseProbe):
         return getattr(self, '_test_error', 'Python socket module not available')
 
     def probe(self, target: str, port: int = None, timeout: int = 10) -> ProbeResult:
-        if port is None:
-            port = 80
-
-        try:
-            start = time.time()
-            sock = socket.create_connection((target, port), timeout=timeout)
-            elapsed = (time.time() - start) * 1000  # ms
-            sock.close()
-
-            return ProbeResult(
-                success=True,
-                latency=round(elapsed, 2),
-                tcp_time=round(elapsed, 2),
-            )
-        except socket.timeout:
-            return ProbeResult(success=False, error='Connection timed out')
-        except ConnectionRefusedError:
-            return ProbeResult(success=False, error=f'Connection refused on port {port}')
-        except Exception as e:
-            return ProbeResult(success=False, error=str(e))
+        r = tcp_ping(target, port=port or 80, timeout=timeout)
+        return ProbeResult(
+            success=r.success,
+            latency=r.latency,
+            tcp_time=r.latency,
+            error=r.error,
+        )
 
 
 register_probe('tcp', TCPProbe)

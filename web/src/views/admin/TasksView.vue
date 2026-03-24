@@ -196,19 +196,19 @@ onMounted(fetchData)
           <NInput v-model:value="form.name" />
         </NFormItem>
         <NFormItem label="源节点" required>
-          <NSelect v-model:value="form.source_node_id" :options="nodeOptions" filterable />
+          <NSelect v-model:value="form.source_node_id" :options="nodeOptions" filterable :disabled="isEdit" />
         </NFormItem>
         <NFormItem label="协议">
-          <NSelect v-model:value="form.protocol" :options="protocolOptions" />
+          <NSelect v-model:value="form.protocol" :options="protocolOptions" :disabled="isEdit" />
         </NFormItem>
         <NFormItem label="目标类型">
-          <NSelect v-model:value="form.target_type" :options="targetTypeOptions" />
+          <NSelect v-model:value="form.target_type" :options="targetTypeOptions" :disabled="isEdit" />
         </NFormItem>
         <NFormItem v-if="form.target_type === 'internal'" label="目标节点">
-          <NSelect v-model:value="form.target_node_id" :options="nodeOptions" filterable />
+          <NSelect v-model:value="form.target_node_id" :options="nodeOptions" filterable :disabled="isEdit" />
         </NFormItem>
         <NFormItem v-else label="目标地址">
-          <NInput v-model:value="form.target_address" placeholder="IP 或域名" />
+          <NInput v-model:value="form.target_address" placeholder="IP 或域名" :disabled="isEdit" />
         </NFormItem>
         <NFormItem v-if="needsPort" label="目标端口">
           <NInputNumber v-model:value="form.target_port" :min="1" :max="65535" style="width: 100%" />

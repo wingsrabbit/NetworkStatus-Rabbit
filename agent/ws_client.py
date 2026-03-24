@@ -146,7 +146,7 @@ class WSClient:
             'protocols': protocols,
             'unsupported': unsupported,
             'unsupported_reasons': unsupported_reasons,
-            'agent_version': '0.124.0',
+            'agent_version': '0.125.0',
             'os': f'{platform.system()} {platform.release()}',
             'public_ip': public_ip,
             'private_ip': private_ip,

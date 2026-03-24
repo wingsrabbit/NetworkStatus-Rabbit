@@ -2,6 +2,58 @@
 
 ---
 
+## v0.125 (2026-03-24)
+
+### Bug 修复
+
+#### 问题 1：ICMP 抖动恢复 — 前端基于最近 10 个延迟点计算窗口抖动
+
+- **文件**：`web/src/views/TaskDetailView.vue`
+- **问题**：v0.124 将 ICMP 探测改为 `count=1` 单次模型后，`_parse_jitter()` 无法从单包 ping 输出中解析 `mdev`，导致 `jitter` 恒为 `None`，前端抖动折线图和统计完全消失
+- **修复**：
+  - 新增 `computeWindowJitter()` 函数：对每个数据点 i，取 `[i-9, i]` 共 10 个有效 `latency` 值，计算标准差作为窗口抖动
+  - 图表逻辑：优先使用后端返回的 jitter；若全为 null，回退到前端 10 点窗口计算
+  - 新增 `avgWindowJitter` 计算属性，用于统计卡展示平均窗口抖动
+  - 统计卡从 4 列扩展为 5 列（cols="2 m:5"），新增「窗口抖动」卡片，tooltip 说明计算口径
+  - 图表中抖动系列名称从「抖动 (ms)」改为「窗口抖动 (ms)」，明确语义
+
+#### 问题 2：Agent 探测层按 PROJECT 11.4 重构 — 补齐 network_tools 目录，UDP 回到真实探测模型
+
+- **文件**：`agent/network_tools/`（新增）、`agent/probes/icmp_probe.py`、`agent/probes/tcp_probe.py`、`agent/probes/udp_probe.py`
+- **问题**：Agent 没有按 PROJECT 11.4 要求将 Network-Monitoring-Tools-web 放在 `agent/network_tools/` 作为探测核心，`probes/*.py` 直接承担探测逻辑而非适配层。UDP 探测使用 `nc -u -z` 只做端口可达检测，不返回 `packet_loss` / `jitter`，指标无物理意义
+- **修复**：
+  - 新增 `agent/network_tools/` 目录，按 PROJECT 11.4 结构建立子模块：`icmp_ping/`、`tcp_ping/`、`udp_ping/`、`curl_ping/`、`dns_lookup/`
+  - `icmp_ping`：将原 `icmp_probe.py` 中的 ping 解析逻辑迁入，probe 端只做适配
+  - `tcp_ping`：将原 `tcp_probe.py` 中的 socket connect 逻辑迁入，probe 端只做适配
+  - `udp_ping`：**全新实现**，基于 Python socket SOCK_DGRAM，发送 5 包 UDP 探测报文，逐包测量 RTT，支持 ICMP unreachable 回应和超时丢包检测，正式计算 `latency`（平均 RTT）、`packet_loss`（丢包率 %）、`jitter`（RTT 标准差）
+  - UDP 自检从依赖 `nc` 改为依赖 Python socket，消除外部命令依赖
+  - `probes/*.py` 统一收敛为纯适配层，只负责参数映射和 `ProbeResult` 归一化
+
+#### 问题 3：任务编辑接口事务边界修复 — DB 保存与 Agent 下发状态解耦
+
+- **文件**：`server/services/task_service.py`、`server/api/tasks.py`
+- **问题**：`increment_config_version()` 内部自行 `db.session.commit()`，与调用方共享 session，导致任务变更被提前落库；后续 WebSocket 通知若抛异常，接口返回 500 但数据已入库
+- **修复**：
+  - `increment_config_version()` 移除内部 `commit()`，只修改 node 对象，事务提交权交回调用方
+  - `tasks.py` 所有 CRUD 函数统一：先完成数据库变更 + commit，再 try/except 通知 Agent
+  - `_notify_agent_task_change` 重命名为 `_try_notify_agent`，返回 `bool`；通知失败时响应中追加 `sync_status: 'pending'`，不再用 500 伪装成保存失败
+  - `create_task`、`update_task`、`delete_task`、`toggle_task` 四个端点全部修复
+
+#### 问题 4：任务编辑前端禁用后端不支持的字段
+
+- **文件**：`web/src/views/admin/TasksView.vue`
+- **问题**：编辑弹窗允许修改 `source_node_id`、`protocol`、`target_type`、`target_node_id`、`target_address`，但后端 `PUT /tasks/<id>` 不更新这些字段，用户修改后看似成功实则无效
+- **修复**：
+  - 编辑模式（`isEdit === true`）下，上述 5 个字段的控件统一添加 `:disabled="isEdit"`
+  - 创建模式不受影响，仍可自由填写
+
+### 版本号更新
+
+- `web/package.json` version：`0.124.0` → `0.125.0`
+- `agent/ws_client.py` agent_version：`0.124.0` → `0.125.0`
+
+---
+
 ## v0.124 (2026-03-24)
 
 ### Bug 修复
