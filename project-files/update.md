@@ -2,6 +2,55 @@
 
 ---
 
+## v0.123 (2026-03-24)
+
+### Bug 修复
+
+#### 问题 1：图表底部布局修正 — dataZoom/图例/坐标轴不再重叠
+
+- **文件**：`web/src/views/TaskDetailView.vue`
+- **问题**：`dataZoom` 滑动条、图例和坐标轴标签挤压在同一底部区域，三者互相覆盖导致信息显示不完整
+- **修复**：
+  - `legend.bottom` 从 `0` 调整为 `30`
+  - `grid.bottom` 从 `70` 调整为 `96`
+  - `dataZoom slider.bottom` 从 `24` 调整为 `8`
+  - 图表容器高度从 `400px` 调整为 `430px`
+  - 三层内容（图例 → 滑动条 → 底边）间距分明，不再重叠
+
+#### 问题 2：`最后更新` 语义修正 — 不再因定时轮询误标为新数据
+
+- **文件**：`web/src/views/TaskDetailView.vue`
+- **问题**：`fetchData()` 每次成功都调用 `__nsr_markDataReceived()`，导致即使定时重拉到同批旧数据，页脚"最后更新"也被重置为"10秒内"，不再准确反映新探测结果到达时间
+- **修复**：
+  - 从 `fetchData()` 中移除 `__nsr_markDataReceived()` 调用
+  - 仅保留 `handleRealtimeUpdate()` 中的调用，确保"最后更新"严格绑定实时 WebSocket 新结果到达
+  - 首屏加载和定时重拉不再错误地刷新页脚新鲜度标记
+
+#### 问题 3：Agent 调度器修正 — 从串行等待改为固定节拍
+
+- **文件**：`agent/scheduler.py`
+- **问题**：`_task_loop()` 采用"执行探测 → 等待 interval"的串行模型，实际周期 = 探测耗时 + interval，导致 `interval=1` 的任务实际采样频率低于 1Hz，`total_probes` 明显少于理论值
+- **修复**：
+  - 引入 `next_run` 固定节拍变量，基于 `time.monotonic()` 计算下一次运行时间
+  - 每次探测完成后 `next_run += interval`，实际等待 `max(0, next_run - now)`
+  - 若探测耗时超过 interval（过载），重置节拍避免连续突发，并记录 debug 日志
+  - 理想情况下采样周期等于配置的 interval，不再受探测耗时影响
+
+#### 问题 4：数据点数展示增强 — 显示 `实际/理论` 双值
+
+- **文件**：`web/src/views/TaskDetailView.vue`
+- **问题**：前端仅显示后端 `total_probes`（实际记录数），未使用 v0.122 已返回的 `expected_probes`（理论次数），用户无法判断是否存在采样偏差
+- **修复**：
+  - 数据点数统计卡改为显示 `实际 / 理论` 格式，如 `1692 / 1800`
+  - 当 `expected_probes` 不可用时降级为仅显示 `total_probes`
+
+### 版本号更新
+
+- `web/package.json` version：`0.122.0` → `0.123.0`
+- `agent/ws_client.py` agent_version：`0.122.0` → `0.123.0`
+
+---
+
 ## v0.122 (2026-03-24)
 
 ### Bug 修复

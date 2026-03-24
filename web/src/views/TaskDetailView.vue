@@ -81,8 +81,6 @@ async function fetchData() {
     points.value = dataRes.data.data
     stats.value = statsRes.data.stats
     updateChart()
-    // 通知全局状态栏收到新数据
-    ;(window as any).__nsr_markDataReceived?.()
   } finally {
     loading.value = false
   }
@@ -175,8 +173,8 @@ function updateChart() {
         return html
       },
     },
-    legend: { bottom: 0 },
-    grid: { left: 60, right: hasLoss ? 60 : 30, top: 30, bottom: 70 },
+    legend: { bottom: 30 },
+    grid: { left: 60, right: hasLoss ? 60 : 30, top: 30, bottom: 96 },
     xAxis: {
       type: 'time',
       min: now - windowMs,
@@ -186,7 +184,7 @@ function updateChart() {
     },
     dataZoom: [
       { type: 'inside', xAxisIndex: 0, filterMode: 'none' },
-      { type: 'slider', xAxisIndex: 0, bottom: 24, height: 20, filterMode: 'none' },
+      { type: 'slider', xAxisIndex: 0, bottom: 8, height: 20, filterMode: 'none' },
     ],
     yAxis,
     series,
@@ -272,14 +270,14 @@ watch(range, () => {
       </NGi>
       <NGi>
         <NCard>
-          <NStatistic label="数据点数" :value="stats.total_probes ?? '-'" />
+          <NStatistic label="数据点数" :value="stats.total_probes != null && stats.expected_probes != null ? `${stats.total_probes} / ${stats.expected_probes}` : (stats.total_probes ?? '-')" />
         </NCard>
       </NGi>
     </NGrid>
 
     <NCard>
       <NSpin :show="loading">
-        <div ref="chartRef" style="width: 100%; height: 400px"></div>
+        <div ref="chartRef" style="width: 100%; height: 430px"></div>
       </NSpin>
     </NCard>
   </div>

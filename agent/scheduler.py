@@ -86,7 +86,8 @@ class TaskScheduler:
             self.stop_task(task_id)
 
     def _task_loop(self, task_id, stop_event):
-        """Main loop for a single task."""
+        """Main loop for a single task using fixed-cadence scheduling."""
+        next_run = time.monotonic()
         while not stop_event.is_set():
             config = self.tasks.get(task_id)
             if not config:
@@ -102,6 +103,7 @@ class TaskScheduler:
             if not probe:
                 logger.warning(f"No probe plugin for protocol '{protocol}'")
                 stop_event.wait(interval)
+                next_run = time.monotonic() + interval
                 continue
 
             try:
@@ -112,4 +114,11 @@ class TaskScheduler:
             except Exception as e:
                 logger.error(f"Probe error for task {task_id}: {e}")
 
-            stop_event.wait(interval)
+            next_run += interval
+            sleep_time = max(0, next_run - time.monotonic())
+            if sleep_time == 0:
+                # Probe took longer than interval; reset cadence to avoid burst
+                logger.debug(f"Task {task_id}: probe overran interval, resetting cadence")
+                next_run = time.monotonic() + interval
+                sleep_time = interval
+            stop_event.wait(sleep_time)
