@@ -232,13 +232,27 @@ from(bucket: "{bucket}")
     def _query_task_data_aggregated_from_raw(self, task_id, time_range, window):
         """Fallback: aggregate raw data on-the-fly when agg bucket is empty."""
         flux = f'''
-from(bucket: "{self.bucket_raw}")
+import "math"
+
+numeric = from(bucket: "{self.bucket_raw}")
   |> range(start: -{time_range})
   |> filter(fn: (r) => r._measurement == "probe_result")
   |> filter(fn: (r) => r.task_id == "{task_id}")
   |> filter(fn: (r) => r._field == "latency" or r._field == "packet_loss" or r._field == "jitter"
-                     or r._field == "success" or r._field == "status_code")
+                     or r._field == "status_code"
+                     or r._field == "dns_time" or r._field == "tcp_time"
+                     or r._field == "tls_time" or r._field == "ttfb" or r._field == "total_time")
   |> aggregateWindow(every: {window}, fn: mean, createEmpty: false)
+
+bools = from(bucket: "{self.bucket_raw}")
+  |> range(start: -{time_range})
+  |> filter(fn: (r) => r._measurement == "probe_result")
+  |> filter(fn: (r) => r.task_id == "{task_id}")
+  |> filter(fn: (r) => r._field == "success")
+  |> map(fn: (r) => ({{r with _value: if r._value then 1.0 else 0.0}}))
+  |> aggregateWindow(every: {window}, fn: mean, createEmpty: false)
+
+union(tables: [numeric, bools])
   |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> sort(columns: ["_time"])
 '''
@@ -246,18 +260,19 @@ from(bucket: "{self.bucket_raw}")
         results = []
         for table in tables:
             for record in table.records:
+                success_val = record.values.get('success')
                 results.append({
                     'timestamp': record.get_time().isoformat(),
                     'latency': record.values.get('latency'),
                     'packet_loss': record.values.get('packet_loss'),
                     'jitter': record.values.get('jitter'),
-                    'success': record.values.get('success'),
+                    'success': success_val > 0.5 if success_val is not None else None,
                     'status_code': record.values.get('status_code'),
-                    'dns_time': None,
-                    'tcp_time': None,
-                    'tls_time': None,
-                    'ttfb': None,
-                    'total_time': None,
+                    'dns_time': record.values.get('dns_time'),
+                    'tcp_time': record.values.get('tcp_time'),
+                    'tls_time': record.values.get('tls_time'),
+                    'ttfb': record.values.get('ttfb'),
+                    'total_time': record.values.get('total_time'),
                     'resolved_ip': None,
                 })
         return results
@@ -311,20 +326,24 @@ from(bucket: "{bucket}")
         }
 
     def _select_bucket(self, time_range):
-        """Select appropriate bucket based on time range."""
-        # Parse time range string to hours
+        """Select appropriate bucket based on time range.
+
+        v0.130 scheme: ≤1h → raw (秒), ≤3d → agg_1m (分), >3d → agg_1h (时)
+        """
         hours = self._parse_range_to_hours(time_range)
-        if hours <= 24:
+        if hours <= 1:
             return self.bucket_raw
-        elif hours <= 7 * 24:
+        elif hours <= 3 * 24:
             return self.bucket_1m
         else:
             return self.bucket_1h
 
     @staticmethod
     def _parse_range_to_hours(time_range):
-        """Parse time range string like '6h', '3d', '14d' to hours."""
-        if time_range.endswith('h'):
+        """Parse time range string like '30m', '6h', '3d' to hours."""
+        if time_range.endswith('m'):
+            return int(time_range[:-1]) / 60
+        elif time_range.endswith('h'):
             return int(time_range[:-1])
         elif time_range.endswith('d'):
             return int(time_range[:-1]) * 24

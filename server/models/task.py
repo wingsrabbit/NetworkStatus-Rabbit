@@ -33,6 +33,26 @@ class ProbeTask(db.Model):
     source_node = db.relationship('Node', foreign_keys=[source_node_id], backref='source_tasks')
     target_node = db.relationship('Node', foreign_keys=[target_node_id])
 
+    def _effective_target_address(self):
+        target_addr = self.target_address
+        if self.target_type == 'internal' and self.target_node:
+            target_addr = self.target_node.public_ip or self.target_node.private_ip or self.target_node.name
+        return target_addr
+
+    def _effective_target_port(self):
+        """For internal TCP/UDP tasks, use the target node's listen_port from capabilities."""
+        if self.target_type != 'internal':
+            return self.target_port
+        if self.protocol not in ('tcp', 'udp'):
+            return self.target_port
+
+        capabilities = self.target_node._parse_capabilities() if self.target_node else None
+        listen_port = capabilities.get('listen_port') if isinstance(capabilities, dict) else None
+        if isinstance(listen_port, int) and 1 <= listen_port <= 65535:
+            return listen_port
+        # Target has no listen port — return stored port anyway (will fail at probe time)
+        return self.target_port
+
     def to_dict(self):
         return {
             'id': self.id,
@@ -40,8 +60,8 @@ class ProbeTask(db.Model):
             'source_node_id': self.source_node_id,
             'target_type': self.target_type,
             'target_node_id': self.target_node_id,
-            'target_address': self.target_address,
-            'target_port': self.target_port,
+            'target_address': self._effective_target_address(),
+            'target_port': self._effective_target_port(),
             'protocol': self.protocol,
             'interval': self.interval,
             'timeout': self.timeout,
@@ -58,14 +78,11 @@ class ProbeTask(db.Model):
 
     def to_agent_dict(self):
         """Format for sending to agent via WebSocket."""
-        target_addr = self.target_address
-        if self.target_type == 'internal' and self.target_node:
-            target_addr = self.target_node.public_ip or self.target_node.private_ip or self.target_node.name
         return {
             'task_id': self.id,
             'target_type': self.target_type,
-            'target_address': target_addr,
-            'target_port': self.target_port,
+            'target_address': self._effective_target_address(),
+            'target_port': self._effective_target_port(),
             'protocol': self.protocol,
             'interval': self.interval,
             'timeout': self.timeout,

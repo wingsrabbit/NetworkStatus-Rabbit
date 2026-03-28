@@ -148,21 +148,28 @@ def get_deploy_command(node_id):
     if not node:
         return not_found('节点不存在')
 
-    # Generate deploy command template (token not included - admin must use the one from creation)
+    # Generate deploy command template
     host = request.host.split(':')[0]
-    port = request.host.split(':')[1] if ':' in request.host else '9191'
+    agent_port = 9192  # Agent connects to dedicated agent channel port
 
     command = (
-        f'curl -fsSL http://{host}:{port}/api/install-agent.sh | bash -s -- '
-        f'--server={host} --port={port} --node-id={node.id} --token=<YOUR_TOKEN>'
+        f'curl -fsSL http://{host}:9191/api/install-agent.sh | bash -s -- '
+        f'--server={host} --port={agent_port} --node-id={node.id} --token=<YOUR_TOKEN>'
     )
     docker_command = (
         f'docker run -d --restart=always --name ns-agent --net=host '
         f'networkstatus-rabbit-agent '
-        f'--server={host} --port={port} --node-id={node.id} --token=<YOUR_TOKEN>'
+        f'--server={host} --port={agent_port} --node-id={node.id} --token=<YOUR_TOKEN>'
+    )
+    docker_command_with_listen = (
+        f'docker run -d --restart=always --name ns-agent --net=host '
+        f'networkstatus-rabbit-agent '
+        f'--server={host} --port={agent_port} --node-id={node.id} --token=<YOUR_TOKEN> '
+        f'--listen-port 9192'
     )
     return jsonify({
         'script_command': command,
         'docker_command': docker_command,
+        'docker_command_listen': docker_command_with_listen,
         'node_id': node.id,
     }), 200

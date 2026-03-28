@@ -131,7 +131,7 @@ def task_data(task_id):
     if not task:
         return not_found('任务不存在')
 
-    time_range = request.args.get('range', '6h')
+    time_range = request.args.get('range', '1h')
     data = influx_service.query_task_data(task_id, time_range)
     return jsonify({'data': data}), 200
 
@@ -180,7 +180,7 @@ def task_alert_intervals(task_id):
     if not task:
         return not_found('任务不存在')
 
-    time_range = request.args.get('range', '6h')
+    time_range = request.args.get('range', '1h')
     from server.models.alert import AlertHistory
     from datetime import datetime, timezone, timedelta
     range_seconds = _parse_range_to_seconds(time_range)
@@ -201,16 +201,19 @@ def _parse_range_to_seconds(time_range: str) -> int:
         return int(time_range[:-1]) * 3600
     elif time_range.endswith('d'):
         return int(time_range[:-1]) * 86400
-    return 6 * 3600
+    return 3600
 
 
 def _get_bucket_type(time_range: str) -> str:
-    """Determine bucket type matching influx_service._select_bucket logic."""
+    """Determine bucket type matching influx_service._select_bucket logic.
+
+    v0.130: ≤1h → raw, ≤3d → 1m, >3d → 1h
+    """
     seconds = _parse_range_to_seconds(time_range)
     hours = seconds / 3600
-    if hours <= 24:
+    if hours <= 1:
         return 'raw'
-    elif hours <= 7 * 24:
+    elif hours <= 3 * 24:
         return '1m'
     else:
         return '1h'

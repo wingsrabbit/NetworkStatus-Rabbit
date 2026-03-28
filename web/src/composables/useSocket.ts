@@ -48,6 +48,7 @@ export function useSocket() {
       const store = useDashboardStore()
       if (data.tasks) {
         store.updateTaskSnapshot(data.tasks)
+        ;(window as any).__nsr_markDataReceived?.()
       }
     })
 

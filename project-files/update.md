@@ -2,6 +2,117 @@
 
 ---
 
+## v0.130 (2026-03-28)
+
+### 架构重构
+
+#### 1. 项目结构优化 — 直接使用 Network-Monitoring-Tools
+
+- **文件**：`agent/tools/`（新增）、`agent/vendor/`（删除）、`agent/network_tools/`（删除）、`agent/probes/*.py`
+- **变更**：
+  - 将 `Network-Monitoring-Tools` 完整复制到 `agent/tools/`，每个子目录添加 `__init__.py`
+  - 删除 `agent/vendor/`（旧 importlib 适配层）和 `agent/network_tools/`（旧薄封装层）
+  - 5 个探针重写：直接 `from agent.tools.<module>` 导入，消除两层间接调用
+  - ICMP → `run_ping`，TCP → `tcp_connect_single`，UDP → `_perform_ping_batch`，HTTP → `run_curl`，DNS → `resolve_dns_with_server`
+
+#### 2. 端口拆分 9191/9192
+
+- **文件**：`docker-compose.yml`、`nginx/nginx.conf`、`agent/config.py`、`server/api/nodes.py`
+- **变更**：
+  - 9191 = Web 端口（SPA + REST API + Dashboard WebSocket），通过 nginx 代理
+  - 9192 = Agent 数据通道，backend:5000 直接暴露，Agent 直连无需经过 nginx
+  - Agent 默认连接端口从 9191 改为 9192
+  - 部署命令生成使用 `--port=9192`
+
+#### 3. Agent listen-port 通用化
+
+- **文件**：`agent/config.py`、`agent/udp_echo.py`（重写）、`agent/main.py`、`agent/ws_client.py`、`server/models/task.py`、`web/src/views/admin/NodesView.vue`、`web/src/types/index.ts`
+- **变更**：
+  - `--udp-echo-port` 重命名为 `--listen-port`，默认不开启（NAT 安全）
+  - 开启后同时启动 TCP echo + UDP echo 双协议监听
+  - `capabilities.udp_echo_port` → `capabilities.listen_port`
+  - 服务端 `_effective_target_port()` 对 TCP 和 UDP 内部任务统一使用目标节点 `listen_port`
+  - 前端节点管理 3 态协议展示：绿色 = 支持且可被探测、黄色 = 支持但未开放端口、灰色 = 不支持
+  - 部署弹窗新增"开放端口"Docker 命令模板（含 `--listen-port`）
+
+### 性能优化
+
+#### 4. 时间窗口优化
+
+- **文件**：`server/services/influx_service.py`、`server/api/data.py`、`web/src/views/TaskDetailView.vue`
+- **变更**：
+  - 时间范围精简为 6 档：30m / 1h / 24h / 3d / 7d / 30d（移除 6h、14d）
+  - Bucket 选择策略调整：≤1h → raw（秒级），≤3d → agg_1m（分钟级），>3d → agg_1h（小时级）
+  - 刷新频率：30m/1h=5s，24h/3d=60s，7d/30d=300s
+  - 实时追加仅限 raw 粒度（30m/1h）
+  - X 轴格式：30m/1h → `HH:mm:ss`，24h/3d → `HH:mm`，7d/30d → `MM-dd HH:mm`
+  - `expected_probes` 和 `_get_bucket_type()` 同步更新
+
+### Bug 修复
+
+#### 5. "最后更新" 时间戳修复
+
+- **文件**：`web/src/composables/useSocket.ts`
+- **问题**：`dashboard:probe_snapshot` WebSocket 事件处理中未调用 `markDataReceived()`，仪表盘页面收到实时数据后页脚仍显示 "416秒前"
+- **修复**：在 `probe_snapshot` 处理中接收到新数据后调用 `(window as any).__nsr_markDataReceived?.()`
+
+### Docker 部署
+
+#### 6. 一键 Docker 部署
+
+- **文件**：`Dockerfile`（重写）、`Dockerfile.agent`、`docker-compose.yml`、`scripts/entrypoint.sh`（新增）
+- **变更**：
+  - 多阶段构建：Stage 1 用 node:20-alpine 编译前端，Stage 2 用 python:3.12-slim 运行后端
+  - entrypoint.sh 自动执行：InfluxDB 初始化（bucket + 降采样任务）→ 创建默认管理员 → 启动服务
+  - 前端构建产物通过 named volume `frontend_dist` 共享给 nginx 容器
+  - 首次部署只需：`cp .env.example .env`（修改密码）→ `docker compose up -d`
+
+### 其他
+
+#### 7. 任务创建端口逻辑清理
+
+- **文件**：`web/src/views/admin/TasksView.vue`
+- **变更**：移除 internal+UDP 创建时自动填充 9999 的硬编码逻辑，端口由服务端通过目标节点 `listen_port` 自动确定
+
+### 版本号更新
+
+- `version.py`: 0.129.0 → 0.130.0
+- `web/package.json`: 0.129.0 → 0.130.0
+
+---
+
+## v0.129 (2026-03-28)
+
+### Bug 修复
+
+#### 问题 18：内部 UDP 任务缺少目标侧回显服务，Agent 对 Agent 测试天然 100% 丢包
+
+- **文件**：`version.py`、`agent/config.py`、`agent/udp_echo.py`、`agent/main.py`、`agent/probes/udp_probe.py`、`agent/ws_client.py`、`server/models/task.py`、`web/src/types/index.ts`、`web/src/views/admin/TasksView.vue`
+- **问题**：现有实现只有 UDP 客户端探测，没有在目标 Agent 上启动 UDP echo listener；服务端下发内部 UDP 任务时继续沿用数据库里的业务端口，现网 `1udp2` 实际被发往 `123.253.226.12:22`，因此 `client-1 -> client-2` 的 UDP 任务必然 100% 丢包
+- **修复**：
+  - Agent 启动时内建 `UDP echo server`，默认监听 `0.0.0.0:9999`
+  - Agent 认证时新增 `capabilities.udp_echo_port` 上报，中心可获知目标节点 UDP echo 端口
+  - 服务端对 `internal + udp` 任务统一使用目标节点 `udp_echo_port`，若目标节点尚未上报则回退到统一默认 `9999`，不再复用旧业务端口
+  - `UDPProbe.self_test()` 改为实际创建 Python UDP socket，不再错误依赖 `nc`
+  - 任务创建页在 `internal + udp` 场景自动预填 `9999`，前端类型补充 `udp_echo_port`
+
+#### 问题 19：后端镜像未包含 Agent 源码，服务端无法向节点下发新版 Agent
+
+- **文件**：`Dockerfile`、`Dockerfile.agent`、`server/api/__init__.py`、`server/app.py`、`version.py`
+- **问题**：后端镜像只复制了 `server/`、`manage.py`、`scripts/` 和 `requirements.txt`，没有复制 `agent/` / `requirements-agent.txt` / `version.py`；导致线上 `GET /api/agent-package.tar.gz` 在容器内找不到 `/app/agent`，接口直接返回 `500`，Agent 无法通过服务端获取更新包
+- **修复**：
+  - 后端镜像和 Agent 镜像统一复制 `agent/`、`requirements-agent.txt`、`version.py`
+  - `GET /api/agent-package.tar.gz` 打包时新增 `version.py`，下载文件名携带版本号
+  - 新增 `GET /api/version` 公开接口，服务端启动日志打印当前版本，便于核对 center 版本是否已切换
+
+### 版本号更新
+
+- 新增根级 `version.py`，统一维护服务端 / Agent 共享版本：`0.129.0`
+- `web/package.json` version：`0.128.0` → `0.129.0`
+- Agent 上报版本改为读取 `version.py` 的 `APP_VERSION`，现网节点版本统一为 `0.129.0`
+
+---
+
 ## v0.128 (2026-03-24)
 
 ### Vendor 统一接入

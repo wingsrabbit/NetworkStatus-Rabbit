@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 
 import socketio
 
+from version import APP_VERSION
+
 logger = logging.getLogger(__name__)
 
 
@@ -148,7 +150,8 @@ class WSClient:
             'protocols': protocols,
             'unsupported': unsupported,
             'unsupported_reasons': unsupported_reasons,
-            'agent_version': '0.127.0',
+            'agent_version': APP_VERSION,
+            'listen_port': self.config.listen_port if self.config.listen_ready else None,
             'os': f'{platform.system()} {platform.release()}',
             'public_ip': public_ip,
             'private_ip': private_ip,

@@ -1,9 +1,9 @@
-"""DNS Lookup probe plugin — adapter wrapping network_tools.dns_lookup (Project 11.4)."""
+"""DNS Lookup probe — calls agent.tools.dns_lookup directly."""
 import shutil
 import logging
 
 from agent.probes.base import BaseProbe, ProbeResult, register_probe
-from agent.network_tools.dns_lookup import probe as dns_probe_fn
+from agent.tools.dns_lookup.monitor_dns import resolve_dns_with_server
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +14,6 @@ class DNSProbe(BaseProbe):
         return 'dns'
 
     def self_test(self) -> bool:
-        """Check dig or nslookup is available."""
         if shutil.which('dig'):
             return True
         if shutil.which('nslookup'):
@@ -26,14 +25,18 @@ class DNSProbe(BaseProbe):
         return getattr(self, '_test_error', 'dig/nslookup not available')
 
     def probe(self, target: str, port: int = None, timeout: int = 10) -> ProbeResult:
-        r = dns_probe_fn(target, port=port, timeout=timeout)
-        return ProbeResult(
-            success=r.success,
-            latency=r.latency,
-            dns_time=r.latency,
-            resolved_ip=r.resolved_ip,
-            error=r.error,
-        )
+        try:
+            dns_time_ms, resolved_ip, status, all_ips = resolve_dns_with_server(target, dns_server=None)
+            latency = float(dns_time_ms) if dns_time_ms and dns_time_ms != 'N/A' else None
+            return ProbeResult(
+                success=status == 'SUCCESS',
+                latency=latency,
+                dns_time=latency,
+                resolved_ip=resolved_ip if resolved_ip else None,
+                error=None if status == 'SUCCESS' else status,
+            )
+        except Exception as e:
+            return ProbeResult(success=False, error=str(e))
 
 
 register_probe('dns', DNSProbe)

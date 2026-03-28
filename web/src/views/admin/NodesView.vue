@@ -21,6 +21,7 @@ const showEdit = ref(false)
 const newNodeToken = ref('')
 const deployScriptCommand = ref('')
 const deployDockerCommand = ref('')
+const deployDockerListenCommand = ref('')
 const createForm = ref({ name: '', label_1: '', label_2: '', label_3: '' })
 const editForm = ref<Partial<Node>>({})
 const editingId = ref('')
@@ -43,11 +44,19 @@ async function handleCreate() {
   }
   try {
     const res = await createNode(createForm.value)
+    const nodeId = res.data.node.id
     newNodeToken.value = res.data.node.token || ''
     showCreate.value = false
-    showToken.value = true
     createForm.value = { name: '', label_1: '', label_2: '', label_3: '' }
     fetchNodes()
+    // Fetch deploy command with actual token
+    try {
+      const cmdRes = await getDeployCommand(nodeId)
+      deployScriptCommand.value = cmdRes.data.script_command.replace('<YOUR_TOKEN>', newNodeToken.value)
+      deployDockerCommand.value = cmdRes.data.docker_command.replace('<YOUR_TOKEN>', newNodeToken.value)
+      deployDockerListenCommand.value = cmdRes.data.docker_command_listen.replace('<YOUR_TOKEN>', newNodeToken.value)
+    } catch { /* ignore */ }
+    showToken.value = true
     message.success('节点创建成功')
   } catch (err: any) {
     message.error(err.response?.data?.error?.message || '创建失败')
@@ -101,6 +110,7 @@ async function handleDeploy(id: string) {
     const res = await getDeployCommand(id)
     deployScriptCommand.value = res.data.script_command
     deployDockerCommand.value = res.data.docker_command
+    deployDockerListenCommand.value = res.data.docker_command_listen
     showDeploy.value = true
   } catch (err: any) {
     message.error(err.response?.data?.error?.message || '获取失败')
@@ -133,23 +143,31 @@ const columns: DataTableColumns<Node> = [
   { title: '版本', key: 'agent_version', width: 80 },
   { title: 'IP', key: 'public_ip', width: 130 },
   {
-    title: '协议支持', key: 'capabilities', width: 220,
+    title: '协议支持', key: 'capabilities', width: 260,
     render: (row) => {
       const ALL_PROTOCOLS = ['icmp', 'tcp', 'udp', 'http', 'dns']
+      /** Protocols that require a listen_port on the target agent for internal probes */
+      const PORT_REQUIRED = ['tcp', 'udp']
       const caps = row.capabilities
       const supported = caps?.protocols || []
       const reasons = caps?.unsupported_reasons || {}
+      const listenPort = caps?.listen_port
       return h(NSpace, { size: 4 }, {
         default: () => ALL_PROTOCOLS.map((p) => {
           const isSupported = supported.includes(p)
-          const tag = h(NTag, {
-            type: isSupported ? 'success' : 'default',
-            size: 'small',
-          }, { default: () => p.toUpperCase() })
-          if (!isSupported && reasons[p]) {
+          const needsPort = PORT_REQUIRED.includes(p)
+          const canBeTarget = !needsPort || (typeof listenPort === 'number' && listenPort > 0)
+          let tagType: 'success' | 'warning' | 'default' = 'default'
+          if (isSupported && canBeTarget) tagType = 'success'
+          else if (isSupported && !canBeTarget) tagType = 'warning'
+          const tag = h(NTag, { type: tagType, size: 'small' }, { default: () => p.toUpperCase() })
+          let tooltip = ''
+          if (!isSupported) tooltip = reasons[p] || '不支持'
+          else if (!canBeTarget) tooltip = `${p.toUpperCase()} 探测可用，但此节点未开放 listen-port，不能作为内部 ${p.toUpperCase()} 目标`
+          if (tooltip) {
             return h(NTooltip, null, {
               trigger: () => tag,
-              default: () => reasons[p],
+              default: () => tooltip,
             })
           }
           return tag
@@ -159,17 +177,21 @@ const columns: DataTableColumns<Node> = [
   },
   {
     title: '操作', key: 'actions', width: 280,
-    render: (row) => h(NSpace, { size: 4 }, {
-      default: () => [
+    render: (row) => {
+      const buttons: any[] = [
         h(NButton, { size: 'small', onClick: () => openEdit(row) }, { default: () => '编辑' }),
         h(NButton, { size: 'small', type: row.enabled ? 'warning' : 'success', onClick: () => handleToggle(row) }, { default: () => row.enabled ? '禁用' : '启用' }),
-        h(NButton, { size: 'small', type: 'info', onClick: () => handleDeploy(row.id) }, { default: () => '部署' }),
-        h(NPopconfirm, { onPositiveClick: () => handleDelete(row.id) }, {
-          trigger: () => h(NButton, { size: 'small', type: 'error' }, { default: () => '删除' }),
-          default: () => '确定删除此节点？',
-        }),
-      ],
-    }),
+      ]
+      // Only show deploy for nodes not yet connected
+      if (row.status !== 'online') {
+        buttons.push(h(NButton, { size: 'small', type: 'info', onClick: () => handleDeploy(row.id) }, { default: () => '部署' }))
+      }
+      buttons.push(h(NPopconfirm, { onPositiveClick: () => handleDelete(row.id) }, {
+        trigger: () => h(NButton, { size: 'small', type: 'error' }, { default: () => '删除' }),
+        default: () => '确定删除此节点？',
+      }))
+      return h(NSpace, { size: 4 }, { default: () => buttons })
+    },
   },
 ]
 
@@ -189,6 +211,7 @@ onMounted(fetchNodes)
       :data="nodes"
       :loading="loading"
       :pagination="{ page, pageSize: 20, itemCount: total, onChange: (p: number) => { page = p; fetchNodes() } }"
+      :scroll-x="1600"
       style="margin-top: 16px"
     />
 
@@ -220,20 +243,31 @@ onMounted(fetchNodes)
       </template>
     </NModal>
 
-    <!-- Token Modal -->
-    <NModal v-model:show="showToken" preset="card" title="节点 Token" style="width: 500px">
-      <p style="color: #d03050; font-weight: bold;">
+    <!-- Token + Deploy Modal (shown after creation) -->
+    <NModal v-model:show="showToken" preset="card" title="节点创建成功" style="width: 680px">
+      <p style="color: #d03050; font-weight: bold; margin-bottom: 8px;">
         ⚠️ 请妥善保存此 Token，它只会显示一次！
       </p>
       <NCode :code="newNodeToken" language="text" word-wrap />
+
+      <template v-if="deployScriptCommand">
+        <p style="font-weight: bold; margin: 20px 0 8px;">脚本安装</p>
+        <NCode :code="deployScriptCommand" language="bash" word-wrap />
+        <p style="font-weight: bold; margin: 16px 0 8px;">Docker 安装（NAT 模式，仅出站探测）</p>
+        <NCode :code="deployDockerCommand" language="bash" word-wrap />
+        <p style="font-weight: bold; margin: 16px 0 8px;">Docker 安装（开放端口，可作为 TCP/UDP 探测目标）</p>
+        <NCode :code="deployDockerListenCommand" language="bash" word-wrap />
+      </template>
     </NModal>
 
     <!-- Deploy Command Modal -->
-    <NModal v-model:show="showDeploy" preset="card" title="部署命令" style="width: 600px">
+    <NModal v-model:show="showDeploy" preset="card" title="部署命令" style="width: 650px">
       <p style="font-weight: bold; margin-bottom: 8px;">脚本安装</p>
       <NCode :code="deployScriptCommand" language="bash" word-wrap />
-      <p style="font-weight: bold; margin: 16px 0 8px;">Docker 安装</p>
+      <p style="font-weight: bold; margin: 16px 0 8px;">Docker 安装（NAT 模式，仅出站探测）</p>
       <NCode :code="deployDockerCommand" language="bash" word-wrap />
+      <p style="font-weight: bold; margin: 16px 0 8px;">Docker 安装（开放端口，可作为 TCP/UDP 探测目标）</p>
+      <NCode :code="deployDockerListenCommand" language="bash" word-wrap />
     </NModal>
   </div>
 </template>

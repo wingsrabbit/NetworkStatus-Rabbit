@@ -28,6 +28,7 @@ export interface NodeCapabilities {
   protocols: string[]
   unsupported: string[]
   unsupported_reasons: Record<string, string>
+  listen_port?: number | null
   os?: string
 }
 

@@ -1,153 +1,329 @@
 # NetworkStatus-Rabbit 🐇
 
-**网络质量监控平台** — 分布式多节点网络探测与实时可视化系统。
+分布式多节点网络质量监控平台，支持 ICMP / TCP / UDP / HTTP / DNS 五种协议探测，实时仪表盘 + 历史图表 + 告警通知。
 
-## 架构概览
+![version](https://img.shields.io/badge/version-v0.132-blue)
+![Python](https://img.shields.io/badge/python-3.12-green)
+![License](https://img.shields.io/badge/license-MIT-orange)
 
-```
-┌─────────────┐       ┌──────────────────┐       ┌─────────────┐
-│   Frontend  │◄─────►│   Center Server  │◄─────►│  InfluxDB   │
-│  Vue 3 SPA  │  WS   │  Flask+SocketIO  │       │   2.7 TSB   │
-└─────────────┘       └────────┬─────────┘       └─────────────┘
-                               │ WS (/agent)
-                     ┌─────────┼─────────┐
-                     ▼         ▼         ▼
-                 ┌───────┐ ┌───────┐ ┌───────┐
-                 │Agent 1│ │Agent 2│ │Agent N│
-                 └───────┘ └───────┘ └───────┘
-```
+---
 
-- **Center (Server)**: Flask + Flask-SocketIO，承载 REST API、WebSocket 处理、告警引擎
-- **Agent**: 部署于多个被测节点，执行 ICMP/TCP/UDP/HTTP/DNS 探测，结果实时上报
-- **Frontend**: Vue 3 + Naive UI + ECharts，仪表盘实时刷新
-- **InfluxDB 2.7**: 三级 Bucket（raw 3d / agg_1m 7d / agg_1h 30d）自动降采样
+## 目录
 
-## 支持的探测协议
+- [功能特性](#功能特性)
+- [快速开始 — 服务端](#快速开始--服务端)
+- [快速开始 — Agent](#快速开始--agent)
+- [更新与维护](#更新与维护)
+- [后台管理](#后台管理)
+- [端口说明](#端口说明)
+- [数据持久化](#数据持久化)
+- [CLI 命令](#cli-命令)
+- [非 Docker 部署](#非-docker-部署)
+- [技术栈](#技术栈)
+- [架构概览](#架构概览)
 
-| 协议 | 指标 |
+---
+
+## 功能特性
+
+| 类别 | 特性 |
 |------|------|
-| ICMP | latency, packet_loss, jitter |
-| TCP | latency (connect time) |
-| UDP | latency |
-| HTTP | dns_time, tcp_time, tls_time, ttfb, total_time, status_code |
-| DNS | latency, resolved_ip |
+| 探测协议 | ICMP（延迟/丢包/抖动）、TCP（连接延迟/抖动）、UDP（延迟/丢包/抖动）、HTTP（DNS/TCP/TLS/TTFB 分阶段计时 + 状态码）、DNS（解析时间 + IP 变更追踪） |
+| 实时监控 | WebSocket 推送，仪表盘卡片/列表双视图切换，分页（10/20/50），首字母排序 |
+| 历史数据 | ECharts 时序图表，30分钟 ~ 30天多粒度，三级数据降采样（raw → 1m → 1h） |
+| 告警引擎 | 窗口评估 + 状态机，触发/恢复/冷却，Webhook 通知（企业微信、Slack 等） |
+| 节点管理 | Web 后台增删改节点，自动生成 Agent 部署命令 |
+| 权限模型 | admin / readonly 角色 |
+| 主题 | 明/暗主题一键切换 |
+| 部署 | Docker 多阶段构建，一键安装，支持热更新 |
 
-## 快速启动
+---
 
-### 前置要求
+## 快速开始 — 服务端
 
-- Docker + Docker Compose
-- Node.js 18+ (前端构建)
-
-### 1. 配置环境变量
+在你的**主控服务器**上执行一行命令即可完成安装：
 
 ```bash
-cp .env.example .env
-# 编辑 .env 设置 SECRET_KEY、INFLUXDB 相关参数
+bash <(curl -sL https://raw.githubusercontent.com/wingsrabbit/NetworkStatus-Rabbit/NetworkStatus-Rabbit-NG/install.sh)
 ```
 
-### 2. 构建前端
+安装脚本会自动完成：
+1. 检测并安装 Docker（如未安装）
+2. 克隆代码到 `/opt/NetworkStatus-Rabbit`
+3. 自动生成随机密钥（`.env` 文件）
+4. 构建镜像并启动所有服务
+5. 初始化数据库和默认管理员
+
+启动后：
+- 🌐 监控面板：`http://你的IP:9191`
+- 🔑 默认账号：`admin` / `admin123456`
+
+> ⚠️ **请立即登录后台修改默认密码！**
+
+### 手动安装（可选）
+
+如果你不想用一键脚本，也可以手动安装：
 
 ```bash
-cd web
-npm install
-npm run build
-cd ..
+git clone -b NetworkStatus-Rabbit-NG https://github.com/wingsrabbit/NetworkStatus-Rabbit.git
+cd NetworkStatus-Rabbit
+
+# 生成配置文件（自动生成随机密钥）
+cat > .env <<EOF
+SECRET_KEY=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)
+INFLUXDB_TOKEN=$(head -c 64 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 64)
+INFLUXDB_PASSWORD=$(head -c 24 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 24)
+EOF
+
+# 构建并启动
+docker compose up -d --build
 ```
 
-### 3. 启动服务
+---
+
+## 快速开始 — Agent
+
+Agent 部署在每台**被监控节点**上，执行探测任务并将结果上报给服务端。
+
+### 方式一：一键安装
+
+在后台管理「节点管理」中添加节点后，系统会生成部署命令。在目标机器上执行：
 
 ```bash
-docker compose up -d
+bash <(curl -sL https://raw.githubusercontent.com/wingsrabbit/NetworkStatus-Rabbit/NetworkStatus-Rabbit-NG/install.sh) agent \
+  --server 服务端IP \
+  --port 9192 \
+  --node-id <节点ID> \
+  --token <节点Token>
 ```
 
-服务启动后：
-- Web UI: `http://localhost:9191`
-- API: `http://localhost:9191/api/`
-- InfluxDB: `http://localhost:8086`
+将参数替换为后台管理中生成的实际值。
 
-### 4. 初始化
+### 方式二：Docker 手动部署
 
 ```bash
-# 初始化 InfluxDB Bucket 和降采样任务
-docker compose exec backend python scripts/setup-influxdb.py
+git clone -b NetworkStatus-Rabbit-NG https://github.com/wingsrabbit/NetworkStatus-Rabbit.git
+cd NetworkStatus-Rabbit
+docker build -t nsr-agent -f Dockerfile.agent .
 
-# 创建管理员账号
-docker compose exec backend python manage.py create-admin
+docker run -d --restart=always --name nsr-agent --net=host \
+  nsr-agent \
+  --server 服务端IP \
+  --port 9192 \
+  --node-id <节点ID> \
+  --token <节点Token>
 ```
 
-### 5. 部署 Agent
+> Agent 和服务端使用不同的 Dockerfile，Agent 镜像更轻量。
 
-在 Center Web UI 中创建节点后，使用生成的部署命令在目标机器上安装 Agent。
-
-或手动运行：
+### 方式三：直接运行 Python（开发/调试用）
 
 ```bash
+pip install -r requirements-agent.txt
 python -m agent.main \
-    --server <center-host> \
-    --port 9191 \
-    --node-id <node-uuid> \
-    --token <node-token>
+  --server 服务端IP \
+  --port 9192 \
+  --node-id <节点ID> \
+  --token <节点Token>
 ```
 
-## 项目结构
+---
 
-```
-├── server/                # Center 后端
-│   ├── api/               # REST API Blueprints
-│   ├── models/            # SQLAlchemy 数据模型
-│   ├── services/          # 业务逻辑层
-│   ├── ws/                # WebSocket 命名空间
-│   ├── utils/             # 工具函数
-│   ├── app.py             # Flask App Factory
-│   └── config.py          # 配置
-├── agent/                 # Agent 端
-│   ├── probes/            # 探测插件 (ICMP/TCP/UDP/HTTP/DNS)
-│   ├── main.py            # Agent 入口
-│   ├── ws_client.py       # WebSocket 客户端
-│   ├── scheduler.py       # 任务调度器
-│   ├── local_cache.py     # 本地 SQLite 缓存
-│   └── config.py          # Agent 配置
-├── web/                   # Vue 3 前端
-│   └── src/
-│       ├── api/           # Axios API 封装
-│       ├── views/         # 页面视图
-│       ├── stores/        # Pinia 状态管理
-│       ├── composables/   # Vue Composables
-│       ├── router/        # 路由
-│       └── types/         # TypeScript 类型
-├── scripts/               # 工具脚本
-├── nginx/                 # Nginx 配置
-├── docker-compose.yml     # Docker Compose
-├── manage.py              # CLI 管理工具
-└── requirements.txt       # Python 依赖
+## 更新与维护
+
+### 热更新（推荐，仅后端改动时）
+
+```bash
+cd /opt/NetworkStatus-Rabbit
+bash update.sh
 ```
 
-## 核心功能
+脚本会自动拉取最新代码，将后端文件热拷贝到容器内并重启，**无需重建镜像**。
 
-- **多节点管理**: 创建/编辑/启停节点，自动生成认证 Token
-- **探测任务**: 支持 5 种协议，可配置间隔(1-60s)、超时、目标类型
-- **实时仪表盘**: WebSocket 推送，卡片式布局，按协议/标签/状态筛选
-- **历史数据**: ECharts 时序图表，支持 30min-30天 多粒度查看
-- **告警引擎**: 窗口评估 + 状态机，支持触发/恢复/冷却，Webhook 通知
-- **权限模型**: admin / operator / readonly 三级角色
-- **Agent 本地缓存**: 断线期间数据缓存，重连后批量补传
-- **暗黑主题**: 支持明/暗主题一键切换
+> **注意：** 如果涉及前端改动，脚本会自动检测并触发完整重建。
+
+### 完整重建（涉及前端或 Dockerfile 改动时）
+
+```bash
+cd /opt/NetworkStatus-Rabbit
+git pull
+docker compose up -d --build
+```
+
+> `data/` 目录中的配置和数据会保留，无需重新设置。
+
+### Agent 更新
+
+```bash
+cd /opt/networkstatus-agent
+git pull
+docker build -t nsr-agent -f Dockerfile.agent .
+docker rm -f nsr-agent
+# 重新运行启动命令
+```
+
+---
+
+## 后台管理
+
+登录 `http://你的IP:9191` 后可访问管理功能：
+
+| 功能 | 说明 |
+|------|------|
+| 节点管理 | 增删改查，一键生成 Agent 部署命令 |
+| 任务管理 | 创建探测任务，配置协议/目标/间隔/超时 |
+| 告警通道 | Webhook 通知（企业微信、Slack、自定义 URL） |
+| 告警历史 | 查看告警触发/恢复事件日志 |
+| 用户管理 | admin / readonly 角色管理 |
+| 系统设置 | 全局参数配置 |
+| 深色模式 | 一键切换明/暗主题 |
+
+### 仪表盘功能
+
+- **卡片/列表视图切换**：点击右上角按钮在网格卡片和横向列表间切换
+- **分页显示**：支持 10 / 20 / 50 条每页
+- **搜索过滤**：按任务名、目标地址、节点名搜索
+- **协议过滤**：下拉筛选特定协议
+- **首字母排序**：任务默认按名称排序
+
+---
+
+## 端口说明
+
+| 端口 | 用途 | 必需 |
+|------|------|------|
+| 9191 | Web 监控页 + 后台管理 + REST API（HTTP） | ✅ |
+| 9192 | Agent 数据通道（WebSocket） | ✅ |
+
+> InfluxDB 仅在 Docker 内部网络中使用，**不对外暴露端口**。
+
+可通过环境变量自定义端口：
+```bash
+NSR_WEB_PORT=8080 NSR_AGENT_PORT=8081 docker compose up -d
+```
+
+---
+
+## 数据持久化
+
+所有持久化数据通过 Docker Volume 挂载：
+
+```
+data/                    # SQLite 数据库（用户、节点、任务配置）
+influxdb_data (volume)   # InfluxDB 时序数据（自动降采样：raw 3天 → 1m聚合 7天 → 1h聚合 30天）
+frontend_dist (volume)   # 前端编译文件（nginx 共享）
+```
+
+---
 
 ## CLI 命令
 
 ```bash
-python manage.py create-admin       # 创建管理员
-python manage.py remove-admin       # 删除管理员（至少保留一个）
-python manage.py reset-password     # 重置用户密码
+# 创建管理员
+docker exec -it ns-center python manage.py create-admin
+
+# 重置用户密码
+docker exec -it ns-center python manage.py reset-password
+
+# 删除管理员（至少保留一个）
+docker exec -it ns-center python manage.py remove-admin
 ```
 
-## 认证安全
+---
 
-- JWT 存储于 httpOnly Cookie（SameSite=Strict）
-- 节点 Token 使用 bcrypt 哈希存储，仅创建时返回明文
-- 登录失败 10 次锁定 15 分钟
-- 所有 API 端点需认证（登录除外）
+## 非 Docker 部署
+
+<details>
+<summary>点击展开（不推荐，建议使用 Docker）</summary>
+
+### 前置要求
+
+- Python 3.12+
+- Node.js 18+
+- InfluxDB 2.7
+
+### 服务端
+
+```bash
+pip install -r requirements.txt
+
+# 构建前端
+cd web && npm install && npm run build && cd ..
+
+# 设置环境变量
+export INFLUXDB_URL=http://localhost:8086
+export INFLUXDB_TOKEN=your-token
+export INFLUXDB_ORG=networkstatus
+export SECRET_KEY=your-secret-key
+
+# 初始化数据库
+python scripts/setup-influxdb.py
+python manage.py create-admin
+
+# 启动
+python -c "
+from server.app import create_app
+from server.extensions import socketio
+app = create_app()
+socketio.run(app, host='0.0.0.0', port=5000)
+"
+```
+
+### Agent
+
+```bash
+pip install -r requirements-agent.txt
+python -m agent.main --server <IP> --port 9192 --node-id <ID> --token <TOKEN>
+```
+
+</details>
+
+---
+
+## 技术栈
+
+| 层 | 技术 |
+|----|------|
+| 后端 | Python 3.12 + Flask + Flask-SocketIO |
+| 前端 | Vue 3 + TypeScript + Naive UI + ECharts |
+| 数据库 | InfluxDB 2.7（时序数据）+ SQLite（配置数据） |
+| 通信 | Socket.IO（Agent ↔ Center，Dashboard ↔ Center） |
+| 容器 | Docker 多阶段构建（node:20 + python:3.12-slim） |
+| 代理 | Nginx（前端静态 + API/WS 反向代理） |
+
+---
+
+## 架构概览
+
+```
+                        ┌──────────────────────┐
+    浏览器 ◄──9191──►   │     Nginx (静态+代理)  │
+                        └──────────┬───────────┘
+                                   │
+                        ┌──────────▼───────────┐     ┌─────────────┐
+    Agent ◄──9192──►    │   Center (Flask+WS)   │◄──►│  InfluxDB   │
+                        │   REST API + SocketIO │    │  (内部网络)  │
+                        └──────────────────────┘     └─────────────┘
+                                   ▲
+                     ┌─────────────┼─────────────┐
+                     ▼             ▼             ▼
+                 ┌───────┐    ┌───────┐    ┌───────┐
+                 │Agent 1│    │Agent 2│    │Agent N│
+                 │ ICMP  │    │ HTTP  │    │ DNS   │
+                 │ TCP   │    │ TCP   │    │ ICMP  │
+                 │ UDP   │    │ UDP   │    │  ...  │
+                 └───────┘    └───────┘    └───────┘
+```
+
+## 支持的探测协议
+
+| 协议 | 探测指标 | 图表 |
+|------|---------|------|
+| ICMP | 延迟、丢包率、抖动 | 延迟曲线 + 丢包散点 + 抖动虚线 |
+| TCP  | 连接延迟、抖动 | 延迟曲线 + 失败散点 + 抖动虚线 |
+| UDP  | 延迟、丢包率、抖动 | 延迟曲线 + 丢包散点 + 抖动虚线 |
+| HTTP | DNS/TCP/TLS/TTFB 分阶段计时、状态码 | 总时间曲线 + 阶段堆叠面积图 + 状态码散点 |
+| DNS  | 解析时间、解析 IP | 解析时间曲线 + 失败散点 + IP 变更表 |
 
 ## 技术栈
 

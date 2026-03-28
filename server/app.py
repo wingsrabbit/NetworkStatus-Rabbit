@@ -7,11 +7,13 @@ from flask_jwt_extended import exceptions as jwt_exceptions
 
 from server.config import Config
 from server.extensions import db, jwt, socketio
+from version import APP_VERSION
 
 
 def create_app(config_class=Config):
     app = Flask(__name__)
     app.config.from_object(config_class)
+    app.config['APP_VERSION'] = APP_VERSION
 
     # Ensure data directory exists
     os.makedirs(app.config['DATA_DIR'], exist_ok=True)
@@ -48,6 +50,7 @@ def create_app(config_class=Config):
         level=logging.INFO,
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
     )
+    logging.info(f'NetworkStatus-Rabbit Center starting (v{APP_VERSION})')
 
     # Start background tasks
     _start_background_tasks(app)

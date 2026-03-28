@@ -30,6 +30,19 @@ def main():
     logger.info(f"Node ID: {config.node_id}")
     logger.info(f"Server: {config.server_url}")
 
+    # Optional echo server - only starts if --listen-port is specified
+    echo_server = None
+    if config.listen_port is not None:
+        from agent.udp_echo import EchoServer
+        echo_server = EchoServer(config.listen_port)
+        config.listen_ready = echo_server.start()
+        if config.listen_ready:
+            logger.info(f'Echo server (TCP+UDP) enabled on port {config.listen_port}')
+        else:
+            logger.warning(f'Echo server failed to bind port {config.listen_port}')
+    else:
+        logger.info('Echo server not configured (NAT-safe mode, this agent cannot be an internal probe target)')
+
     # Initialize local cache
     cache = LocalCache(config.db_path)
 
@@ -55,18 +68,22 @@ def main():
     cleanup_thread.start()
 
     # Connect and run
-    while True:
-        try:
-            ws_client.connect()
-            ws_client.wait()
-        except KeyboardInterrupt:
-            logger.info("Shutting down...")
-            ws_client.disconnect()
-            break
-        except Exception as e:
-            logger.error(f"Connection error: {e}")
-            logger.info("Reconnecting in 5 seconds...")
-            time.sleep(5)
+    try:
+        while True:
+            try:
+                ws_client.connect()
+                ws_client.wait()
+            except KeyboardInterrupt:
+                logger.info("Shutting down...")
+                ws_client.disconnect()
+                break
+            except Exception as e:
+                logger.error(f"Connection error: {e}")
+                logger.info("Reconnecting in 5 seconds...")
+                time.sleep(5)
+    finally:
+        if echo_server:
+            echo_server.stop()
 
 
 if __name__ == '__main__':

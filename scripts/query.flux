@@ -1,0 +1,5 @@
+from(bucket:"raw")
+  |> range(start:-30s)
+  |> filter(fn:(r) => r._field == "latency")
+  |> group(columns:["protocol"])
+  |> count()

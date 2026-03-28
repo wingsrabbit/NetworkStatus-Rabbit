@@ -30,16 +30,14 @@ const protocol = computed(() => taskInfo.value?.protocol || 'icmp')
 const rangeOptions = [
   { label: '30 分钟', value: '30m' },
   { label: '1 小时', value: '1h' },
-  { label: '6 小时', value: '6h' },
   { label: '24 小时', value: '24h' },
   { label: '3 天', value: '3d' },
   { label: '7 天', value: '7d' },
-  { label: '14 天', value: '14d' },
   { label: '30 天', value: '30d' },
 ]
 
 /** 是否使用 raw 粒度（允许实时追加） */
-const isRawRange = computed(() => ['30m', '1h', '6h', '24h'].includes(range.value))
+const isRawRange = computed(() => ['30m', '1h'].includes(range.value))
 
 /** 是否处于局部缩放状态 */
 const isZoomed = ref(false)
@@ -121,9 +119,9 @@ function rangeToMs(r: string): number {
 }
 
 function refreshInterval(r: string): number {
-  if (['30m', '1h', '6h', '24h'].includes(r)) return 5_000
-  if (['3d', '7d'].includes(r)) return 60_000
-  if (['14d', '30d'].includes(r)) return 300_000
+  if (['30m', '1h'].includes(r)) return 5_000
+  if (['24h', '3d'].includes(r)) return 60_000
+  if (['7d', '30d'].includes(r)) return 300_000
   return 5_000
 }
 
@@ -228,9 +226,9 @@ function getXAxisConfig() {
 
   const xAxisLabelFormat = (() => {
     switch (range.value) {
-      case '30m': case '1h': case '6h': return '{HH}:{mm}:{ss}'
-      case '24h': return '{HH}:{mm}'
-      case '3d': case '7d': case '14d': case '30d': return '{MM}-{dd} {HH}:{mm}'
+      case '30m': case '1h': return '{HH}:{mm}:{ss}'
+      case '24h': case '3d': return '{HH}:{mm}'
+      case '7d': case '30d': return '{MM}-{dd} {HH}:{mm}'
       default: return '{HH}:{mm}:{ss}'
     }
   })()
@@ -240,9 +238,9 @@ function getXAxisConfig() {
 
 function getTooltipFormat(): string {
   switch (range.value) {
-    case '30m': case '1h': case '6h': return 'HH:mm:ss'
-    case '24h': return 'HH:mm'
-    case '3d': case '7d': case '14d': case '30d': return 'MM-DD HH:mm'
+    case '30m': case '1h': return 'HH:mm:ss'
+    case '24h': case '3d': return 'HH:mm'
+    case '7d': case '30d': return 'MM-DD HH:mm'
     default: return 'HH:mm:ss'
   }
 }
@@ -286,7 +284,6 @@ function buildProtocolChart() {
 
 function buildIcmpChart(markArea: any) {
   const latencies = points.value.map((p) => [p.timestamp, p.latency])
-  const losses = points.value.map((p) => [p.timestamp, p.packet_loss])
 
   const backendJitters = points.value.map((p) => p.jitter)
   const hasBackendJitter = backendJitters.some((v) => v != null)
@@ -312,21 +309,23 @@ function buildIcmpChart(markArea: any) {
     markArea,
   }]
 
-  const hasLoss = losses.some(([, v]) => v != null && (v as number) > 0)
+  // Red dots for packet loss
+  const lossPoints = points.value
+    .filter(p => p.packet_loss != null && p.packet_loss > 0)
+    .map(p => [p.timestamp, p.latency ?? 0])
+  if (lossPoints.length > 0) {
+    series.push({
+      name: '丢包',
+      type: 'scatter',
+      data: lossPoints,
+      symbolSize: 6,
+      itemStyle: { color: '#d03050' },
+      z: 10,
+    })
+  }
+
   const hasJitter = jitters.some(([, v]) => v != null)
   const yAxis: any[] = [{ type: 'value', name: 'ms', min: 0 }]
-
-  if (hasLoss) {
-    series.push({
-      name: '丢包率 (%)',
-      type: 'bar',
-      data: losses,
-      yAxisIndex: 1,
-      itemStyle: { color: '#d03050' },
-      barWidth: 4,
-    })
-    yAxis.push({ type: 'value', name: '%', min: 0, max: 100, splitLine: { show: false } })
-  }
 
   if (hasJitter) {
     series.push({
@@ -340,12 +339,14 @@ function buildIcmpChart(markArea: any) {
     })
   }
 
-  return { series, yAxis, rightMargin: hasLoss ? 60 : 30 }
+  return { series, yAxis, rightMargin: 30 }
 }
 
 function buildTcpChart(markArea: any) {
   const latencies = points.value.map((p) => [p.timestamp, p.latency])
-  const successRates = points.value.map((p) => [p.timestamp, p.success === true ? 100 : (p.success === false ? 0 : null)])
+
+  const windowJitters = computeWindowJitter(points.value)
+  const jitters: [any, number | null][] = points.value.map((p, i) => [p.timestamp, windowJitters[i]])
 
   const series: any[] = [{
     name: '连接延迟 (ms)',
@@ -361,26 +362,50 @@ function buildTcpChart(markArea: any) {
     markArea,
   }]
 
-  const hasSuccess = successRates.some(([, v]) => v != null)
-  const yAxis: any[] = [{ type: 'value', name: 'ms', min: 0 }]
-  if (hasSuccess) {
+  // Red dots for connection failures
+  const failPoints = points.value
+    .filter(p => p.success === false)
+    .map(p => [p.timestamp, p.latency ?? 0])
+  if (failPoints.length > 0) {
     series.push({
-      name: '连接成功率 (%)',
-      type: 'bar',
-      data: successRates,
-      yAxisIndex: 1,
-      itemStyle: { color: (params: any) => params.value[1] >= 100 ? '#18a058' : '#d03050' },
-      barWidth: 4,
+      name: '连接失败',
+      type: 'scatter',
+      data: failPoints,
+      symbolSize: 6,
+      itemStyle: { color: '#d03050' },
+      z: 10,
     })
-    yAxis.push({ type: 'value', name: '%', min: 0, max: 100, splitLine: { show: false } })
   }
 
-  return { series, yAxis, rightMargin: hasSuccess ? 60 : 30 }
+  const hasJitter = jitters.some(([, v]) => v != null)
+  if (hasJitter) {
+    series.push({
+      name: '抖动 (ms)',
+      type: 'line',
+      data: jitters,
+      smooth: true,
+      showSymbol: false,
+      lineStyle: { type: 'dashed' },
+      itemStyle: { color: '#f0a020' },
+    })
+  }
+
+  const yAxis: any[] = [{ type: 'value', name: 'ms', min: 0 }]
+  return { series, yAxis, rightMargin: 30 }
 }
 
 function buildUdpChart(markArea: any) {
   const latencies = points.value.map((p) => [p.timestamp, p.latency])
-  const losses = points.value.map((p) => [p.timestamp, p.packet_loss])
+
+  const backendJitters = points.value.map((p) => p.jitter)
+  const hasBackendJitter = backendJitters.some((v) => v != null)
+  let jitters: [any, number | null][]
+  if (hasBackendJitter) {
+    jitters = points.value.map((p) => [p.timestamp, p.jitter])
+  } else {
+    const windowJitters = computeWindowJitter(points.value)
+    jitters = points.value.map((p, i) => [p.timestamp, windowJitters[i]])
+  }
 
   const series: any[] = [{
     name: '延迟 (ms)',
@@ -396,21 +421,36 @@ function buildUdpChart(markArea: any) {
     markArea,
   }]
 
-  const hasLoss = losses.some(([, v]) => v != null && (v as number) > 0)
-  const yAxis: any[] = [{ type: 'value', name: 'ms', min: 0 }]
-  if (hasLoss) {
+  // Red dots for packet loss
+  const lossPoints = points.value
+    .filter(p => p.packet_loss != null && p.packet_loss > 0)
+    .map(p => [p.timestamp, p.latency ?? 0])
+  if (lossPoints.length > 0) {
     series.push({
-      name: '丢包率 (%)',
-      type: 'bar',
-      data: losses,
-      yAxisIndex: 1,
+      name: '丢包',
+      type: 'scatter',
+      data: lossPoints,
+      symbolSize: 6,
       itemStyle: { color: '#d03050' },
-      barWidth: 4,
+      z: 10,
     })
-    yAxis.push({ type: 'value', name: '%', min: 0, max: 100, splitLine: { show: false } })
   }
 
-  return { series, yAxis, rightMargin: hasLoss ? 60 : 30 }
+  const hasJitter = jitters.some(([, v]) => v != null)
+  if (hasJitter) {
+    series.push({
+      name: '抖动 (ms)',
+      type: 'line',
+      data: jitters,
+      smooth: true,
+      showSymbol: false,
+      lineStyle: { type: 'dashed' },
+      itemStyle: { color: '#f0a020' },
+    })
+  }
+
+  const yAxis: any[] = [{ type: 'value', name: 'ms', min: 0 }]
+  return { series, yAxis, rightMargin: 30 }
 }
 
 function buildHttpChart(markArea: any) {
@@ -487,7 +527,6 @@ function buildHttpChart(markArea: any) {
 
 function buildDnsChart(markArea: any) {
   const latencies = points.value.map((p) => [p.timestamp, p.latency])
-  const successRates = points.value.map((p) => [p.timestamp, p.success === true ? 100 : (p.success === false ? 0 : null)])
 
   const series: any[] = [{
     name: '解析时间 (ms)',
@@ -503,21 +542,23 @@ function buildDnsChart(markArea: any) {
     markArea,
   }]
 
-  const hasSuccess = successRates.some(([, v]) => v != null)
-  const yAxis: any[] = [{ type: 'value', name: 'ms', min: 0 }]
-  if (hasSuccess) {
+  // Red dots for resolution failures
+  const failPoints = points.value
+    .filter(p => p.success === false)
+    .map(p => [p.timestamp, p.latency ?? 0])
+  if (failPoints.length > 0) {
     series.push({
-      name: '解析成功率 (%)',
-      type: 'bar',
-      data: successRates,
-      yAxisIndex: 1,
-      itemStyle: { color: (params: any) => params.value[1] >= 100 ? '#18a058' : '#d03050' },
-      barWidth: 4,
+      name: '解析失败',
+      type: 'scatter',
+      data: failPoints,
+      symbolSize: 6,
+      itemStyle: { color: '#d03050' },
+      z: 10,
     })
-    yAxis.push({ type: 'value', name: '%', min: 0, max: 100, splitLine: { show: false } })
   }
 
-  return { series, yAxis, rightMargin: hasSuccess ? 60 : 30 }
+  const yAxis: any[] = [{ type: 'value', name: 'ms', min: 0 }]
+  return { series, yAxis, rightMargin: 30 }
 }
 
 function updateChart() {

@@ -5,6 +5,7 @@ from server.api.data import data_bp
 from server.api.users import users_bp
 from server.api.alerts import alerts_bp
 from server.api.settings import settings_bp
+from version import APP_VERSION
 
 
 def register_blueprints(app):
@@ -25,6 +26,10 @@ def register_blueprints(app):
         script_path = os.path.join(app.root_path, '..', 'scripts', 'install-agent.sh')
         return send_file(script_path, mimetype='text/x-shellscript')
 
+    @app.route('/api/version')
+    def get_version():
+        return {'version': APP_VERSION}, 200
+
     @app.route('/api/agent-package.tar.gz')
     def serve_agent_package():
         """Package and serve agent code as tarball for one-click install."""
@@ -32,11 +37,14 @@ def register_blueprints(app):
         import io
         agent_dir = os.path.join(app.root_path, '..', 'agent')
         req_file = os.path.join(app.root_path, '..', 'requirements-agent.txt')
+        version_file = os.path.join(app.root_path, '..', 'version.py')
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode='w:gz') as tar:
             tar.add(agent_dir, arcname='agent')
             if os.path.exists(req_file):
                 tar.add(req_file, arcname='requirements-agent.txt')
+            if os.path.exists(version_file):
+                tar.add(version_file, arcname='version.py')
         buf.seek(0)
         return send_file(buf, mimetype='application/gzip',
-                         download_name='agent-package.tar.gz', as_attachment=True)
+                         download_name=f'agent-package-{APP_VERSION}.tar.gz', as_attachment=True)

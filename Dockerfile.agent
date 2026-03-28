@@ -10,5 +10,8 @@ COPY requirements-agent.txt .
 RUN pip install --no-cache-dir -r requirements-agent.txt
 
 COPY agent/ ./agent/
+COPY version.py .
 
+# Optional: --listen-port enables this agent as an internal probe target
+# Example: docker run nsr-agent --server x.x.x.x --port 9192 --node-id xxx --token xxx --listen-port 9192
 ENTRYPOINT ["python", "-m", "agent.main"]

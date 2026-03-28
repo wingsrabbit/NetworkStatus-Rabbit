@@ -84,6 +84,15 @@ watch(
   },
 )
 
+watch(
+  [() => form.value.protocol, () => form.value.target_type],
+  ([protocol, targetType]) => {
+    if (!['tcp', 'udp'].includes(protocol || '')) {
+      form.value.target_port = null
+    }
+  },
+)
+
 const hasAlert = computed(() =>
   form.value.alert_latency_threshold != null ||
   form.value.alert_loss_threshold != null ||
@@ -211,6 +220,7 @@ onMounted(fetchData)
       :data="tasks"
       :loading="loading"
       :pagination="{ page, pageSize: 20, itemCount: total, onChange: (p: number) => { page = p; fetchData() } }"
+      :scroll-x="1300"
       style="margin-top: 16px"
     />
 
