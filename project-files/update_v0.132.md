@@ -54,6 +54,7 @@
 | `docker-compose.yml` | 修改 |
 | `README.md` | 重写 |
 | `version.py` | 版本号 0.130.0 → 0.132.0 |
+| `web/package.json` | 版本号 0.130.0 → 0.132.0 |
 | `web/src/views/DashboardView.vue` | 重写（视图切换/分页/排序） |
 | `web/src/views/TaskDetailView.vue` | 修改（TCP/UDP 抖动） |
 | `project-files/update_v0.131.md` | 新增 |
