@@ -119,6 +119,18 @@ class InfluxService:
                 else:
                     point = point.field(field_name, str(value))
 
+        # Store MTR hops as JSON string
+        hops = metrics.get('hops')
+        if hops is not None:
+            import json as _json
+            point = point.field('hops', _json.dumps(hops, ensure_ascii=False))
+
+        # Store extra metadata (e.g. mtr_src, mtr_dst) as JSON string
+        extra = metrics.get('extra')
+        if extra is not None:
+            import json as _json
+            point = point.field('extra', _json.dumps(extra, ensure_ascii=False))
+
         # Set timestamp
         ts = result_data.get('timestamp')
         if ts:
@@ -213,7 +225,7 @@ from(bucket: "{bucket}")
         results = []
         for table in tables:
             for record in table.records:
-                results.append({
+                row = {
                     'timestamp': record.get_time().isoformat(),
                     'latency': record.values.get('latency'),
                     'packet_loss': record.values.get('packet_loss'),
@@ -226,7 +238,22 @@ from(bucket: "{bucket}")
                     'ttfb': record.values.get('ttfb'),
                     'total_time': record.values.get('total_time'),
                     'resolved_ip': record.values.get('resolved_ip'),
-                })
+                }
+                hops_raw = record.values.get('hops')
+                if hops_raw:
+                    import json as _json
+                    try:
+                        row['hops'] = _json.loads(hops_raw)
+                    except (ValueError, TypeError):
+                        row['hops'] = None
+                extra_raw = record.values.get('extra')
+                if extra_raw:
+                    import json as _json
+                    try:
+                        row['extra'] = _json.loads(extra_raw)
+                    except (ValueError, TypeError):
+                        row['extra'] = None
+                results.append(row)
         return results
 
     def _query_task_data_aggregated_from_raw(self, task_id, time_range, window):

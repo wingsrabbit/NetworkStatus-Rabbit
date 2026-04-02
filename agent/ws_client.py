@@ -98,6 +98,19 @@ class WSClient:
             self.config_version = cv
             sio.emit('agent:task_ack', {'config_version': cv}, namespace='/agent')
 
+        @sio.on('center:restart_task', namespace='/agent')
+        def on_restart_task(data):
+            task_id = data.get('task_id')
+            logger.info(f"Received task restart: {task_id}")
+            config = self.scheduler.tasks.get(task_id)
+            if config:
+                config_copy = dict(config)
+                self.scheduler.stop_task(task_id)
+                self.scheduler.start_task(config_copy)
+                logger.info(f"Task {task_id} restarted successfully")
+            else:
+                logger.warning(f"Cannot restart task {task_id}: not found in scheduler")
+
         @sio.on('center:result_ack', namespace='/agent')
         def on_result_ack(data):
             result_id = data.get('result_id')

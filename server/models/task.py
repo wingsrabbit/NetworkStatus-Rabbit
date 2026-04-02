@@ -14,7 +14,7 @@ class ProbeTask(db.Model):
     target_node_id = db.Column(db.String(36), db.ForeignKey('nodes.id'), nullable=True)
     target_address = db.Column(db.String(255), nullable=True)
     target_port = db.Column(db.Integer, nullable=True)
-    protocol = db.Column(db.String(10), nullable=False)  # icmp/tcp/udp/http/dns
+    protocol = db.Column(db.String(20), nullable=False)  # icmp/tcp/udp/http/dns/mtr_icmp/mtr_tcp/mtr_udp
     interval = db.Column(db.Integer, nullable=False, default=5)
     timeout = db.Column(db.Integer, nullable=False, default=10)
     enabled = db.Column(db.Boolean, nullable=False, default=True)
@@ -58,6 +58,8 @@ class ProbeTask(db.Model):
             'id': self.id,
             'name': self.name,
             'source_node_id': self.source_node_id,
+            'source_node_name': self.source_node.name if self.source_node else None,
+            'source_node_ip': (self.source_node.public_ip or self.source_node.private_ip) if self.source_node else None,
             'target_type': self.target_type,
             'target_node_id': self.target_node_id,
             'target_address': self._effective_target_address(),

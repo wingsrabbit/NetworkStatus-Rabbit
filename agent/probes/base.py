@@ -21,6 +21,8 @@ class ProbeResult:
     total_time: Optional[float] = None
     resolved_ip: Optional[str] = None
     error: Optional[str] = None
+    hops: Optional[list] = None
+    extra: Optional[dict] = None
 
     def to_dict(self):
         d = {'success': self.success, 'error': self.error}
@@ -29,6 +31,10 @@ class ProbeResult:
             val = getattr(self, f)
             if val is not None:
                 d[f] = val
+        if self.hops is not None:
+            d['hops'] = self.hops
+        if self.extra is not None:
+            d['extra'] = self.extra
         return d
 
 

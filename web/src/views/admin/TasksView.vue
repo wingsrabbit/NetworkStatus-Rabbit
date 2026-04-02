@@ -47,6 +47,9 @@ const protocolOptions = [
   { label: 'UDP', value: 'udp' },
   { label: 'HTTP', value: 'http' },
   { label: 'DNS', value: 'dns' },
+  { label: 'MTR (ICMP)', value: 'mtr_icmp' },
+  { label: 'MTR (TCP)', value: 'mtr_tcp' },
+  { label: 'MTR (UDP)', value: 'mtr_udp' },
 ]
 
 const targetTypeOptions = [
@@ -58,7 +61,7 @@ const nodeOptions = computed(() =>
   nodes.value.map((n) => ({ label: `${n.name} (${n.id.slice(0, 8)})`, value: n.id }))
 )
 
-const needsPort = computed(() => ['tcp', 'udp'].includes(form.value.protocol || ''))
+const needsPort = computed(() => ['tcp', 'udp', 'mtr_tcp', 'mtr_udp'].includes(form.value.protocol || ''))
 
 const protocolWarning = ref<string | null>(null)
 

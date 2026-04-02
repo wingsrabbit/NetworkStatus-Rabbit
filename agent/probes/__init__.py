@@ -7,3 +7,4 @@ from agent.probes import tcp_probe
 from agent.probes import udp_probe
 from agent.probes import http_probe
 from agent.probes import dns_probe
+from agent.probes import mtr_probe

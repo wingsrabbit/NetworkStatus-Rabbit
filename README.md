@@ -1,8 +1,8 @@
 # NetworkStatus-Rabbit 🐇
 
-分布式多节点网络质量监控平台，支持 ICMP / TCP / UDP / HTTP / DNS 五种协议探测，实时仪表盘 + 历史图表 + 告警通知。
+分布式多节点网络质量监控平台，支持 ICMP / TCP / UDP / HTTP / DNS / MTR 六种协议探测，实时仪表盘 + 历史图表 + 告警通知。
 
-![version](https://img.shields.io/badge/version-v0.132-blue)
+![version](https://img.shields.io/badge/version-v0.133-blue)
 ![Python](https://img.shields.io/badge/python-3.12-green)
 ![License](https://img.shields.io/badge/license-MIT-orange)
 
@@ -28,7 +28,7 @@
 
 | 类别 | 特性 |
 |------|------|
-| 探测协议 | ICMP（延迟/丢包/抖动）、TCP（连接延迟/抖动）、UDP（延迟/丢包/抖动）、HTTP（DNS/TCP/TLS/TTFB 分阶段计时 + 状态码）、DNS（解析时间 + IP 变更追踪） |
+| 探测协议 | ICMP（延迟/丢包/抖动）、TCP（连接延迟/抖动）、UDP（延迟/丢包/抖动）、HTTP（DNS/TCP/TLS/TTFB 分阶段计时 + 状态码）、DNS（解析时间 + IP 变更追踪）、MTR（ICMP/TCP/UDP 三种模式，逐跳路由追踪 + 实时刷新） |
 | 实时监控 | WebSocket 推送，仪表盘卡片/列表双视图切换，分页（10/20/50），首字母排序 |
 | 历史数据 | ECharts 时序图表，30分钟 ~ 30天多粒度，三级数据降采样（raw → 1m → 1h） |
 | 告警引擎 | 窗口评估 + 状态机，触发/恢复/冷却，Webhook 通知（企业微信、Slack 等） |

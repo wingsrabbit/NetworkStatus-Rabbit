@@ -10,6 +10,7 @@ class Node(db.Model):
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = db.Column(db.String(120), nullable=False, unique=True)
     token = db.Column(db.String(256), nullable=False)  # bcrypt hash
+    token_plain = db.Column(db.String(256), nullable=True)  # plaintext for deploy commands
     label_1 = db.Column(db.String(80), nullable=True)
     label_2 = db.Column(db.String(80), nullable=True)
     label_3 = db.Column(db.String(80), nullable=True)

@@ -93,6 +93,40 @@ class DashboardNamespace(Namespace):
             leave_room(room)
             logger.info(f"Dashboard sid={sid} unsubscribed from {room}")
 
+    def on_dashboard_reset_mtr(self, data):
+        """Reset MTR statistics: restart the task on the agent and notify dashboard."""
+        sid = flask_request.sid
+        if sid not in _dashboard_sessions:
+            emit('error', {'code': 'WS_AUTH_FAILED', 'message': '未认证'})
+            return
+
+        task_id = data.get('task_id')
+        if not task_id:
+            emit('error', {'code': 'WS_BAD_REQUEST', 'message': '缺少 task_id'})
+            return
+
+        from server.models.task import ProbeTask
+        from server.extensions import db
+        task = db.session.get(ProbeTask, task_id)
+        if not task:
+            emit('error', {'code': 'WS_INVALID_SUBSCRIBE', 'message': f'任务 {task_id} 不存在'})
+            return
+
+        # Send restart command to the agent
+        from server.services.node_service import get_connection_sid
+        agent_sid = get_connection_sid(task.source_node_id)
+        if agent_sid:
+            from datetime import datetime, timezone
+            reset_time = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+            socketio.emit('center:restart_task', {'task_id': task_id}, room=agent_sid, namespace='/agent')
+            logger.info(f"Sent restart_task to agent sid={agent_sid} for task {task_id}")
+
+            # Notify all dashboard subscribers of this task to reset their state
+            room = f'task:{task_id}'
+            socketio.emit('dashboard:mtr_reset', {'task_id': task_id, 'reset_time': reset_time}, room=room, namespace='/dashboard')
+        else:
+            logger.warning(f"Agent for node {task.source_node_id} not connected, cannot restart task {task_id}")
+
 
 def push_task_detail(task_id, result_data):
     """Push real-time probe data to subscribers of a specific task."""

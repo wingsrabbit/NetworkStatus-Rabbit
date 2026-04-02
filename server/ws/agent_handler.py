@@ -223,6 +223,8 @@ class AgentNamespace(Namespace):
             'ttfb': metrics.get('ttfb'),
             'total_time': metrics.get('total_time'),
             'resolved_ip': metrics.get('resolved_ip'),
+            'hops': metrics.get('hops'),
+            'extra': metrics.get('extra'),
         }
         push_task_detail(task_id, flat_result)
 

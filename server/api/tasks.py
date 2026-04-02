@@ -10,7 +10,7 @@ from server.utils.errors import bad_request, not_found, validation_error
 
 tasks_bp = Blueprint('tasks', __name__)
 
-VALID_PROTOCOLS = {'icmp', 'tcp', 'udp', 'http', 'dns'}
+VALID_PROTOCOLS = {'icmp', 'tcp', 'udp', 'http', 'dns', 'mtr_icmp', 'mtr_tcp', 'mtr_udp'}
 
 
 @tasks_bp.route('', methods=['GET'])

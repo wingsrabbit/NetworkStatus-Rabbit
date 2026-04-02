@@ -37,7 +37,8 @@ export interface ProbeTask {
   name: string
   source_node_id: string
   source_node_name?: string
-  protocol: 'icmp' | 'tcp' | 'udp' | 'http' | 'dns'
+  source_node_ip?: string
+  protocol: 'icmp' | 'tcp' | 'udp' | 'http' | 'dns' | 'mtr_icmp' | 'mtr_tcp' | 'mtr_udp'
   target_type: 'internal' | 'external'
   target_node_id: string | null
   target_address: string
@@ -79,6 +80,18 @@ export interface AlertHistory {
   created_at: string
 }
 
+export interface MtrHop {
+  hop: number
+  host: string
+  loss: number
+  sent: number
+  last: number
+  avg: number
+  best: number
+  worst: number
+  stdev: number
+}
+
 export interface ProbeResult {
   timestamp: string
   latency: number | null
@@ -92,6 +105,8 @@ export interface ProbeResult {
   total_time: number | null
   status_code: number | null
   resolved_ip: string | null
+  hops: MtrHop[] | null
+  extra?: Record<string, any> | null
 }
 
 export interface DashboardTask {

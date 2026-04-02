@@ -22,6 +22,19 @@ with app.app_context():
     from server.extensions import db
     from server.models.user import User
     db.create_all()
+    # v0.133 migration: add token_plain column to nodes if missing
+    import sqlite3, os
+    db_path = os.path.join(app.config['DATA_DIR'], 'networkstatus.db')
+    if os.path.exists(db_path):
+        conn = sqlite3.connect(db_path)
+        cols = [row[1] for row in conn.execute('PRAGMA table_info(nodes)').fetchall()]
+        if 'token_plain' not in cols:
+            conn.execute('ALTER TABLE nodes ADD COLUMN token_plain VARCHAR(256)')
+            conn.commit()
+            print('Migrated: added token_plain column to nodes table')
+        # v0.133 migration: expand protocol column width if needed
+        cols_tasks = [row for row in conn.execute('PRAGMA table_info(probe_tasks)').fetchall()]
+        conn.close()
     if not User.query.first():
         import bcrypt
         pw = bcrypt.hashpw(b'admin123456', bcrypt.gensalt()).decode()

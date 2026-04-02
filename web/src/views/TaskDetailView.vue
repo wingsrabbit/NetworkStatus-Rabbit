@@ -3,14 +3,14 @@ import { onMounted, onUnmounted, ref, watch, shallowRef, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   NCard, NSpace, NSelect, NStatistic, NGrid, NGi, NSpin, NPageHeader, NButton, NTooltip,
-  NTable
+  NTable, NTag
 } from 'naive-ui'
 import * as echarts from 'echarts'
 import dayjs from 'dayjs'
 import { getTaskData, getTaskStats, getTaskAlerts } from '@/api/data'
 import { getTask } from '@/api/tasks'
 import { useSocket } from '@/composables/useSocket'
-import type { ProbeResult, AlertHistory, ProbeTask } from '@/types'
+import type { ProbeResult, AlertHistory, ProbeTask, MtrHop } from '@/types'
 
 const route = useRoute()
 const taskId = route.params.taskId as string
@@ -26,6 +26,84 @@ const loading = ref(false)
 const range = ref('30m')
 
 const protocol = computed(() => taskInfo.value?.protocol || 'icmp')
+
+/** Whether this is an MTR protocol */
+const isMtr = computed(() => ['mtr_icmp', 'mtr_tcp', 'mtr_udp'].includes(protocol.value))
+
+/** Latest MTR hops data (updated in real-time) */
+const mtrHops = ref<MtrHop[]>([])
+const mtrLastUpdate = ref<string | null>(null)
+/** Timestamp when cumulative MTR stats began (first data or after reset) */
+const mtrStartTime = ref<string | null>(null)
+
+/** Cumulative MTR state for Linux-style display */
+interface CumHopState {
+  hop: number
+  hosts: string[]
+  totalSent: number
+  totalLost: number
+  last: number
+  best: number
+  worst: number
+  sumLatency: number
+  m2: number
+}
+const mtrCumState = ref<Map<number, CumHopState>>(new Map())
+const mtrSrc = ref('')
+const mtrDst = ref('')
+
+function mergeHops(hops: MtrHop[], extra?: Record<string, any> | null, timestamp?: string) {
+  if (extra?.mtr_src) mtrSrc.value = extra.mtr_src
+  if (extra?.mtr_dst) mtrDst.value = extra.mtr_dst
+  for (const hop of hops) {
+    let cum = mtrCumState.value.get(hop.hop)
+    if (!cum) {
+      cum = { hop: hop.hop, hosts: [], totalSent: 0, totalLost: 0, last: 0, best: Infinity, worst: 0, sumLatency: 0, m2: 0 }
+      mtrCumState.value.set(hop.hop, cum)
+    }
+    if (hop.host !== '???' && !cum.hosts.includes(hop.host)) cum.hosts.push(hop.host)
+    const batchSent = hop.sent
+    const batchLost = Math.round(batchSent * hop.loss / 100)
+    const oldTotal = cum.totalSent
+    const oldAvg = oldTotal > 0 ? cum.sumLatency / oldTotal : 0
+    cum.totalSent += batchSent
+    cum.totalLost += batchLost
+    cum.last = hop.last
+    if (hop.best > 0) cum.best = Math.min(cum.best, hop.best)
+    if (hop.worst > 0) cum.worst = Math.max(cum.worst, hop.worst)
+    cum.sumLatency += hop.avg * batchSent
+    const batchM2 = hop.stdev * hop.stdev * batchSent
+    const delta = oldAvg - hop.avg
+    cum.m2 += batchM2 + (oldTotal > 0 ? oldTotal * batchSent * delta * delta / cum.totalSent : 0)
+  }
+}
+
+const mtrDisplayHops = computed(() => {
+  const sorted = Array.from(mtrCumState.value.values()).sort((a, b) => a.hop - b.hop)
+  return sorted.map(cum => {
+    const loss = cum.totalSent > 0 ? (cum.totalLost / cum.totalSent * 100) : 0
+    const avg = cum.totalSent > 0 ? cum.sumLatency / cum.totalSent : 0
+    const stdev = cum.totalSent > 1 ? Math.sqrt(cum.m2 / cum.totalSent) : 0
+    return {
+      hop: cum.hop,
+      host: cum.hosts.length > 0 ? cum.hosts[0] : '???',
+      altHosts: cum.hosts.length > 1 ? cum.hosts.slice(1) : [],
+      loss, sent: cum.totalSent, last: cum.last, avg,
+      best: cum.best === Infinity ? 0 : cum.best,
+      worst: cum.worst, stdev,
+    }
+  })
+})
+
+function resetMtrStats() {
+  mtrCumState.value = new Map()
+  mtrSrc.value = ''
+  mtrDst.value = ''
+  mtrLastUpdate.value = null
+  mtrStartTime.value = new Date().toISOString()
+  // Tell server to restart the MTR task on the agent
+  socket.value?.emit('dashboard:reset_mtr', { task_id: taskId })
+}
 
 const rangeOptions = [
   { label: '30 分钟', value: '30m' },
@@ -211,6 +289,35 @@ async function fetchData() {
     alertHistory.value = results[2].data.alerts || []
     if (results[3]) {
       taskInfo.value = results[3].data.task
+    }
+    // Extract latest MTR hops from the most recent point
+    if (isMtr.value && points.value.length > 0) {
+      // Only merge on refresh if no cumulative state yet (first load).
+      // After a reset, cumulative state is built exclusively from real-time pushes.
+      if (mtrCumState.value.size === 0 && !mtrStartTime.value) {
+        // First load: set start time from task creation, merge all historical data
+        mtrStartTime.value = taskInfo.value?.created_at || points.value[0].timestamp
+        for (const pt of points.value) {
+          if (pt.hops) {
+            mergeHops(pt.hops, pt.extra, pt.timestamp)
+            mtrLastUpdate.value = pt.timestamp
+          }
+        }
+      } else if (mtrCumState.value.size === 0) {
+        // After reset: only merge data points newer than mtrStartTime
+        for (const pt of points.value) {
+          if (pt.hops && pt.timestamp > mtrStartTime.value!) {
+            mergeHops(pt.hops, pt.extra, pt.timestamp)
+            mtrLastUpdate.value = pt.timestamp
+          }
+        }
+      } else {
+        // Just update timestamp from latest point
+        const lastPoint = points.value[points.value.length - 1]
+        if (lastPoint.hops) {
+          mtrLastUpdate.value = lastPoint.timestamp
+        }
+      }
     }
     updateChart()
   } finally {
@@ -562,7 +669,7 @@ function buildDnsChart(markArea: any) {
 }
 
 function updateChart() {
-  if (!chart.value) return
+  if (!chart.value || isMtr.value) return
 
   const { series, yAxis, rightMargin } = buildProtocolChart()
   const { effectiveStart, effectiveEnd, xAxisLabelFormat } = getXAxisConfig()
@@ -622,6 +729,13 @@ function handleRealtimeUpdate(data: any) {
   if (data.task_id !== taskId) return
   const result = data.result as ProbeResult
   if (!result) return
+
+  // Update MTR hops on every real-time push
+  if (isMtr.value && result.hops) {
+    mergeHops(result.hops, result.extra, result.timestamp)
+    mtrLastUpdate.value = result.timestamp
+  }
+
   if (!isRawRange.value) return
   points.value.push(result)
   if (points.value.length > 500) points.value.shift()
@@ -629,8 +743,23 @@ function handleRealtimeUpdate(data: any) {
   ;(window as any).__nsr_markDataReceived?.()
 }
 
-onMounted(() => {
-  if (chartRef.value) {
+function handleMtrReset(data: any) {
+  if (data.task_id !== taskId) return
+  mtrCumState.value = new Map()
+  mtrSrc.value = ''
+  mtrDst.value = ''
+  mtrLastUpdate.value = null
+  mtrStartTime.value = data.reset_time || new Date().toISOString()
+}
+
+onMounted(async () => {
+  // Fetch task info first so isMtr can be evaluated before chart init
+  try {
+    const res = await getTask(taskId)
+    taskInfo.value = res.data.task
+  } catch (_) { /* will be retried in fetchData */ }
+
+  if (!isMtr.value && chartRef.value) {
     chart.value = echarts.init(chartRef.value)
     window.addEventListener('resize', () => chart.value?.resize())
   }
@@ -638,12 +767,14 @@ onMounted(() => {
   startAutoRefresh()
   subscribeTask(taskId)
   socket.value?.on('dashboard:task_detail', handleRealtimeUpdate)
+  socket.value?.on('dashboard:mtr_reset', handleMtrReset)
 })
 
 onUnmounted(() => {
   stopAutoRefresh()
   unsubscribeTask(taskId)
   socket.value?.off('dashboard:task_detail', handleRealtimeUpdate)
+  socket.value?.off('dashboard:mtr_reset', handleMtrReset)
   chart.value?.dispose()
 })
 
@@ -658,11 +789,93 @@ watch(range, () => {
 <template>
   <div>
     <NPageHeader @back="$router.back()" title="任务详情" />
+    <!-- MTR 模式：只显示 mtr 终端风格的路由追踪表 -->
+    <template v-if="isMtr">
+      <NCard style="margin-top: 16px; font-family: 'Courier New', Consolas, 'Liberation Mono', monospace; background: #1e1e2e; color: #cdd6f4;">
+        <template #header>
+          <NSpace align="center" justify="space-between" style="width: 100%;">
+            <NSpace align="center" :size="12">
+              <span style="color: #cdd6f4;">MTR 路由追踪</span>
+              <NTag size="small" :type="mtrDisplayHops.length > 0 ? 'success' : 'default'"
+                v-if="mtrLastUpdate">{{ dayjs(mtrLastUpdate).format('HH:mm:ss') }} 更新</NTag>
+              <span v-if="mtrStartTime" style="color: #6c7086; font-size: 12px;">
+                开始于 {{ dayjs(mtrStartTime).format('YYYY-MM-DD HH:mm:ss') }}
+              </span>
+            </NSpace>
+            <NButton size="small" quaternary type="warning" @click="resetMtrStats"
+              :disabled="mtrDisplayHops.length === 0">重置统计</NButton>
+          </NSpace>
+        </template>
+        <NSpin :show="loading && mtrDisplayHops.length === 0">
+          <!-- Header: source (IP) → target  |  timestamp + mode -->
+          <div v-if="taskInfo" style="margin-bottom: 8px; color: #a6adc8; font-size: 13px; display: flex; justify-content: space-between;">
+            <span>
+              {{ mtrSrc || taskInfo.source_node_name || taskInfo.source_node_id }}
+              <span v-if="taskInfo.source_node_ip" style="color: #6c7086;">({{ taskInfo.source_node_ip }})</span>
+              →
+              {{ taskInfo.target_address }}
+              <span v-if="mtrDst && mtrDst !== taskInfo.target_address" style="color: #6c7086;">({{ mtrDst }})</span>
+            </span>
+            <span style="color: #6c7086;">
+              <span v-if="mtrLastUpdate" style="margin-right: 16px;">{{ dayjs(mtrLastUpdate).format('YYYY-MM-DDTHH:mm:ssZ') }}</span>
+              {{ protocol.replace('mtr_', '').toUpperCase() }} mode
+            </span>
+          </div>
+          <div v-if="mtrDisplayHops.length === 0" style="text-align: center; padding: 40px 0; color: #6c7086;">
+            等待首次探测结果…
+          </div>
+          <div v-else style="overflow-x: auto;">
+            <table style="width: 100%; border-collapse: collapse; font-size: 13px; line-height: 1.8;">
+              <thead>
+                <tr style="border-bottom: 1px solid #45475a; color: #a6adc8;">
+                  <th style="padding: 4px 10px; text-align: left; width: 40px;"></th>
+                  <th style="padding: 4px 10px; text-align: left; min-width: 200px;">Host</th>
+                  <th style="padding: 4px 10px; text-align: right; width: 70px;">Loss%</th>
+                  <th style="padding: 4px 10px; text-align: right; width: 55px;">Snt</th>
+                  <th style="padding: 4px 10px; text-align: right; width: 75px;">Last</th>
+                  <th style="padding: 4px 10px; text-align: right; width: 75px;">Avg</th>
+                  <th style="padding: 4px 10px; text-align: right; width: 75px;">Best</th>
+                  <th style="padding: 4px 10px; text-align: right; width: 75px;">Wrst</th>
+                  <th style="padding: 4px 10px; text-align: right; width: 75px;">StDev</th>
+                </tr>
+              </thead>
+              <tbody>
+                <template v-for="hop in mtrDisplayHops" :key="hop.hop">
+                  <tr :style="{ borderBottom: hop.altHosts.length > 0 ? 'none' : '1px solid #313244' }">
+                    <td style="padding: 4px 10px; color: #f9e2af;">{{ hop.hop }}.</td>
+                    <td style="padding: 4px 10px;"
+                        :style="{ color: hop.host === '???' ? '#6c7086' : '#cdd6f4' }">{{ hop.host }}</td>
+                    <td style="padding: 4px 10px; text-align: right;"
+                        :style="{ color: hop.loss > 0 ? '#f38ba8' : '#a6e3a1', fontWeight: hop.loss > 0 ? 'bold' : 'normal' }">
+                      {{ hop.loss.toFixed(1) }}%
+                    </td>
+                    <td style="padding: 4px 10px; text-align: right; color: #a6adc8;">{{ hop.sent }}</td>
+                    <td style="padding: 4px 10px; text-align: right; color: #cdd6f4;">{{ hop.last.toFixed(1) }}</td>
+                    <td style="padding: 4px 10px; text-align: right; color: #cdd6f4; font-weight: 500;">{{ hop.avg.toFixed(1) }}</td>
+                    <td style="padding: 4px 10px; text-align: right; color: #a6e3a1;">{{ hop.best.toFixed(1) }}</td>
+                    <td style="padding: 4px 10px; text-align: right; color: #f38ba8;">{{ hop.worst.toFixed(1) }}</td>
+                    <td style="padding: 4px 10px; text-align: right; color: #a6adc8;">{{ hop.stdev.toFixed(1) }}</td>
+                  </tr>
+                  <tr v-for="(altHost, j) in hop.altHosts" :key="`${hop.hop}-alt-${j}`"
+                      :style="{ borderBottom: j === hop.altHosts.length - 1 ? '1px solid #313244' : 'none' }">
+                    <td style="padding: 0 10px;"></td>
+                    <td style="padding: 0 10px 0 30px; color: #7f849c; font-size: 12px;">{{ altHost }}</td>
+                    <td colspan="7"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </NSpin>
+      </NCard>
+    </template>
+
+    <!-- 非 MTR 模式：统计卡片 + 图表 -->
+    <template v-else>
     <NSpace style="margin: 16px 0" align="center">
       <NSelect v-model:value="range" :options="rangeOptions" style="width: 140px" />
       <NButton v-if="isZoomed" size="small" @click="resetZoom">重置缩放</NButton>
     </NSpace>
-
     <NGrid :x-gap="16" :y-gap="16" cols="2 m:5" responsive="screen" style="margin-bottom: 16px">
       <NGi>
         <NCard>
@@ -707,6 +920,7 @@ watch(range, () => {
         <div ref="chartRef" style="width: 100%; height: 430px"></div>
       </NSpin>
     </NCard>
+    </template>
 
     <!-- DNS 协议：解析 IP 变更记录 -->
     <NCard v-if="protocol === 'dns' && dnsIpChanges.length > 0" title="解析 IP 变更记录" style="margin-top: 16px">

@@ -23,6 +23,9 @@ const protocolOptions = [
   { label: 'UDP', value: 'udp' },
   { label: 'HTTP', value: 'http' },
   { label: 'DNS', value: 'dns' },
+  { label: 'MTR (ICMP)', value: 'mtr_icmp' },
+  { label: 'MTR (TCP)', value: 'mtr_tcp' },
+  { label: 'MTR (UDP)', value: 'mtr_udp' },
 ]
 
 const pageSizeOptions = [

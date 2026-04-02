@@ -61,6 +61,7 @@ def create_node():
     node = Node(
         name=name,
         token=token_hash,
+        token_plain=raw_token,
         label_1=data.get('label_1'),
         label_2=data.get('label_2'),
         label_3=data.get('label_3'),
@@ -148,23 +149,24 @@ def get_deploy_command(node_id):
     if not node:
         return not_found('节点不存在')
 
-    # Generate deploy command template
+    # Generate deploy command with actual token
     host = request.host.split(':')[0]
     agent_port = 9192  # Agent connects to dedicated agent channel port
+    token = node.token_plain or '<YOUR_TOKEN>'
 
     command = (
-        f'curl -fsSL http://{host}:9191/api/install-agent.sh | bash -s -- '
-        f'--server={host} --port={agent_port} --node-id={node.id} --token=<YOUR_TOKEN>'
+        f'bash <(curl -sL http://{host}:9191/api/install-agent.sh) agent '
+        f'--server {host} --port {agent_port} --node-id {node.id} --token {token}'
     )
     docker_command = (
         f'docker run -d --restart=always --name ns-agent --net=host '
-        f'networkstatus-rabbit-agent '
-        f'--server={host} --port={agent_port} --node-id={node.id} --token=<YOUR_TOKEN>'
+        f'nsr-agent '
+        f'--server {host} --port {agent_port} --node-id {node.id} --token {token}'
     )
     docker_command_with_listen = (
         f'docker run -d --restart=always --name ns-agent --net=host '
-        f'networkstatus-rabbit-agent '
-        f'--server={host} --port={agent_port} --node-id={node.id} --token=<YOUR_TOKEN> '
+        f'nsr-agent '
+        f'--server {host} --port {agent_port} --node-id {node.id} --token {token} '
         f'--listen-port 9192'
     )
     return jsonify({
