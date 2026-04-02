@@ -117,13 +117,19 @@ class DashboardNamespace(Namespace):
         agent_sid = get_connection_sid(task.source_node_id)
         if agent_sid:
             from datetime import datetime, timezone
-            reset_time = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+            reset_time = datetime.now(timezone.utc)
+            reset_time_str = reset_time.isoformat().replace('+00:00', 'Z')
+
+            # Persist reset time to database
+            task.mtr_reset_time = reset_time
+            db.session.commit()
+
             socketio.emit('center:restart_task', {'task_id': task_id}, room=agent_sid, namespace='/agent')
             logger.info(f"Sent restart_task to agent sid={agent_sid} for task {task_id}")
 
             # Notify all dashboard subscribers of this task to reset their state
             room = f'task:{task_id}'
-            socketio.emit('dashboard:mtr_reset', {'task_id': task_id, 'reset_time': reset_time}, room=room, namespace='/dashboard')
+            socketio.emit('dashboard:mtr_reset', {'task_id': task_id, 'reset_time': reset_time_str}, room=room, namespace='/dashboard')
         else:
             logger.warning(f"Agent for node {task.source_node_id} not connected, cannot restart task {task_id}")
 

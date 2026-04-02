@@ -47,6 +47,7 @@ export interface ProbeTask {
   timeout: number
   enabled: boolean
   created_at: string
+  mtr_reset_time: string | null
   alert_latency_threshold: number | null
   alert_loss_threshold: number | null
   alert_fail_count: number | null

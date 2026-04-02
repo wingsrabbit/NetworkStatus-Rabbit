@@ -1,6 +1,6 @@
 {
   "name": "networkstatus-rabbit-web",
-  "version": "0.135.0",
+  "version": "0.137.0",
   "private": true,
   "type": "module",
   "scripts": {

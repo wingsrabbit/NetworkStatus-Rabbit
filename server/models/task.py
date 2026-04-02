@@ -19,6 +19,7 @@ class ProbeTask(db.Model):
     timeout = db.Column(db.Integer, nullable=False, default=10)
     enabled = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    mtr_reset_time = db.Column(db.DateTime, nullable=True)
 
     # Alert parameters
     alert_latency_threshold = db.Column(db.Float, nullable=True)
@@ -76,6 +77,7 @@ class ProbeTask(db.Model):
             'alert_trigger_count': self.alert_trigger_count,
             'alert_recovery_count': self.alert_recovery_count,
             'alert_cooldown_seconds': self.alert_cooldown_seconds,
+            'mtr_reset_time': self.mtr_reset_time.isoformat() + 'Z' if self.mtr_reset_time else None,
         }
 
     def to_agent_dict(self):

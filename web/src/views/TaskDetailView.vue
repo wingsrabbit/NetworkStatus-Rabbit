@@ -51,6 +51,8 @@ interface CumHopState {
 const mtrCumState = ref<Map<number, CumHopState>>(new Map())
 const mtrSrc = ref('')
 const mtrDst = ref('')
+/** Whether the initial merge from API data has completed (prevents race with WebSocket) */
+const mtrInitialMergeDone = ref(false)
 
 function mergeHops(hops: MtrHop[], extra?: Record<string, any> | null, timestamp?: string) {
   if (extra?.mtr_src) mtrSrc.value = extra.mtr_src
@@ -100,8 +102,8 @@ function resetMtrStats() {
   mtrSrc.value = ''
   mtrDst.value = ''
   mtrLastUpdate.value = null
-  mtrStartTime.value = new Date().toISOString()
-  // Tell server to restart the MTR task on the agent
+  mtrInitialMergeDone.value = false
+  // Tell server to restart the MTR task on the agent (server will persist and push reset_time)
   socket.value?.emit('dashboard:reset_mtr', { task_id: taskId })
 }
 
@@ -292,29 +294,24 @@ async function fetchData() {
     }
     // Extract latest MTR hops from the most recent point
     if (isMtr.value && points.value.length > 0) {
-      // Only merge on refresh if no cumulative state yet (first load).
-      // After a reset, cumulative state is built exclusively from real-time pushes.
-      if (mtrCumState.value.size === 0 && !mtrStartTime.value) {
-        // First load: set start time from task creation, merge all historical data
-        mtrStartTime.value = taskInfo.value?.created_at || points.value[0].timestamp
+      // Set start time from persisted reset time or task creation time
+      if (!mtrStartTime.value) {
+        mtrStartTime.value = taskInfo.value?.mtr_reset_time || taskInfo.value?.created_at || points.value[0].timestamp
+      }
+      if (!mtrInitialMergeDone.value) {
+        // Initial load or after reset: rebuild entirely from API data
+        mtrCumState.value = new Map()
         for (const pt of points.value) {
-          if (pt.hops) {
+          if (pt.hops && pt.timestamp >= mtrStartTime.value!) {
             mergeHops(pt.hops, pt.extra, pt.timestamp)
             mtrLastUpdate.value = pt.timestamp
           }
         }
-      } else if (mtrCumState.value.size === 0) {
-        // After reset: only merge data points newer than mtrStartTime
-        for (const pt of points.value) {
-          if (pt.hops && pt.timestamp > mtrStartTime.value!) {
-            mergeHops(pt.hops, pt.extra, pt.timestamp)
-            mtrLastUpdate.value = pt.timestamp
-          }
-        }
+        mtrInitialMergeDone.value = true
       } else {
-        // Just update timestamp from latest point
+        // Subsequent auto-refresh: just update timestamp (real-time WS handles new data)
         const lastPoint = points.value[points.value.length - 1]
-        if (lastPoint.hops) {
+        if (lastPoint?.hops) {
           mtrLastUpdate.value = lastPoint.timestamp
         }
       }
@@ -749,7 +746,13 @@ function handleMtrReset(data: any) {
   mtrSrc.value = ''
   mtrDst.value = ''
   mtrLastUpdate.value = null
-  mtrStartTime.value = data.reset_time || new Date().toISOString()
+  mtrInitialMergeDone.value = false
+  const resetTime = data.reset_time || new Date().toISOString()
+  mtrStartTime.value = resetTime
+  // Also update taskInfo so subsequent fetchData uses the new reset time
+  if (taskInfo.value) {
+    taskInfo.value.mtr_reset_time = resetTime
+  }
 }
 
 onMounted(async () => {
@@ -757,13 +760,17 @@ onMounted(async () => {
   try {
     const res = await getTask(taskId)
     taskInfo.value = res.data.task
+    // Set MTR start time immediately from persisted reset time or task creation time
+    if (isMtr.value) {
+      mtrStartTime.value = taskInfo.value?.mtr_reset_time || taskInfo.value?.created_at || null
+    }
   } catch (_) { /* will be retried in fetchData */ }
 
   if (!isMtr.value && chartRef.value) {
     chart.value = echarts.init(chartRef.value)
     window.addEventListener('resize', () => chart.value?.resize())
   }
-  fetchData()
+  await fetchData()
   startAutoRefresh()
   subscribeTask(taskId)
   socket.value?.on('dashboard:task_detail', handleRealtimeUpdate)

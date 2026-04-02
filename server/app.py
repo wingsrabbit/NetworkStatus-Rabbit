@@ -41,6 +41,7 @@ def create_app(config_class=Config):
     # Create database tables
     with app.app_context():
         db.create_all()
+        _auto_migrate(db)
 
     # Register error handlers
     _register_error_handlers(app)
@@ -102,6 +103,19 @@ def _register_error_handlers(app):
         return jsonify({
             'error': {'code': 401, 'type': 'auth_error', 'message': '无效的认证信息'}
         }), 401
+
+
+def _auto_migrate(db):
+    """Add new columns to existing tables (lightweight auto-migration for SQLite)."""
+    import sqlite3
+    engine = db.engine
+    with engine.connect() as conn:
+        result = conn.execute(db.text("PRAGMA table_info(probe_tasks)"))
+        cols = {row[1] for row in result}
+        if 'mtr_reset_time' not in cols:
+            conn.execute(db.text("ALTER TABLE probe_tasks ADD COLUMN mtr_reset_time DATETIME"))
+            conn.commit()
+            logging.info("Migration: added mtr_reset_time column to probe_tasks")
 
 
 def _start_background_tasks(app):
