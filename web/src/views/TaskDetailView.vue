@@ -30,79 +30,35 @@ const protocol = computed(() => taskInfo.value?.protocol || 'icmp')
 /** Whether this is an MTR protocol */
 const isMtr = computed(() => ['mtr_icmp', 'mtr_tcp', 'mtr_udp'].includes(protocol.value))
 
-/** Latest MTR hops data (updated in real-time) */
-const mtrHops = ref<MtrHop[]>([])
 const mtrLastUpdate = ref<string | null>(null)
 /** Timestamp when cumulative MTR stats began (first data or after reset) */
 const mtrStartTime = ref<string | null>(null)
 
-/** Cumulative MTR state for Linux-style display */
-interface CumHopState {
-  hop: number
-  hosts: string[]
-  totalSent: number
-  totalLost: number
-  last: number
-  best: number
-  worst: number
-  sumLatency: number
-  m2: number
-}
-const mtrCumState = ref<Map<number, CumHopState>>(new Map())
+/** Latest MTR hops snapshot from the persistent mtr process (agent accumulates stats) */
 const mtrSrc = ref('')
 const mtrDst = ref('')
-/** Whether the initial merge from API data has completed (prevents race with WebSocket) */
-const mtrInitialMergeDone = ref(false)
-
-function mergeHops(hops: MtrHop[], extra?: Record<string, any> | null, timestamp?: string) {
-  if (extra?.mtr_src) mtrSrc.value = extra.mtr_src
-  if (extra?.mtr_dst) mtrDst.value = extra.mtr_dst
-  for (const hop of hops) {
-    let cum = mtrCumState.value.get(hop.hop)
-    if (!cum) {
-      cum = { hop: hop.hop, hosts: [], totalSent: 0, totalLost: 0, last: 0, best: Infinity, worst: 0, sumLatency: 0, m2: 0 }
-      mtrCumState.value.set(hop.hop, cum)
-    }
-    if (hop.host !== '???' && !cum.hosts.includes(hop.host)) cum.hosts.push(hop.host)
-    const batchSent = hop.sent
-    const batchLost = Math.round(batchSent * hop.loss / 100)
-    const oldTotal = cum.totalSent
-    const oldAvg = oldTotal > 0 ? cum.sumLatency / oldTotal : 0
-    cum.totalSent += batchSent
-    cum.totalLost += batchLost
-    cum.last = hop.last
-    if (hop.best > 0) cum.best = Math.min(cum.best, hop.best)
-    if (hop.worst > 0) cum.worst = Math.max(cum.worst, hop.worst)
-    cum.sumLatency += hop.avg * batchSent
-    const batchM2 = hop.stdev * hop.stdev * batchSent
-    const delta = oldAvg - hop.avg
-    cum.m2 += batchM2 + (oldTotal > 0 ? oldTotal * batchSent * delta * delta / cum.totalSent : 0)
-  }
-}
+const mtrLatestHops = ref<MtrHop[]>([])
 
 const mtrDisplayHops = computed(() => {
-  const sorted = Array.from(mtrCumState.value.values()).sort((a, b) => a.hop - b.hop)
-  return sorted.map(cum => {
-    const loss = cum.totalSent > 0 ? (cum.totalLost / cum.totalSent * 100) : 0
-    const avg = cum.totalSent > 0 ? cum.sumLatency / cum.totalSent : 0
-    const stdev = cum.totalSent > 1 ? Math.sqrt(cum.m2 / cum.totalSent) : 0
-    return {
-      hop: cum.hop,
-      host: cum.hosts.length > 0 ? cum.hosts[0] : '???',
-      altHosts: cum.hosts.length > 1 ? cum.hosts.slice(1) : [],
-      loss, sent: cum.totalSent, last: cum.last, avg,
-      best: cum.best === Infinity ? 0 : cum.best,
-      worst: cum.worst, stdev,
-    }
-  })
+  return mtrLatestHops.value.map(hop => ({
+    hop: hop.hop,
+    host: hop.host,
+    altHosts: [] as string[],
+    loss: hop.loss,
+    sent: hop.sent,
+    last: hop.last,
+    avg: hop.avg,
+    best: hop.best,
+    worst: hop.worst,
+    stdev: hop.stdev,
+  }))
 })
 
 function resetMtrStats() {
-  mtrCumState.value = new Map()
+  mtrLatestHops.value = []
   mtrSrc.value = ''
   mtrDst.value = ''
   mtrLastUpdate.value = null
-  mtrInitialMergeDone.value = false
   // Tell server to restart the MTR task on the agent (server will persist and push reset_time)
   socket.value?.emit('dashboard:reset_mtr', { task_id: taskId })
 }
@@ -292,28 +248,17 @@ async function fetchData() {
     if (results[3]) {
       taskInfo.value = results[3].data.task
     }
-    // Extract latest MTR hops from the most recent point
+    // MTR: just use the latest data point's snapshot (agent accumulates stats)
     if (isMtr.value && points.value.length > 0) {
-      // Set start time from persisted reset time or task creation time
       if (!mtrStartTime.value) {
         mtrStartTime.value = taskInfo.value?.mtr_reset_time || taskInfo.value?.created_at || points.value[0].timestamp
       }
-      if (!mtrInitialMergeDone.value) {
-        // Initial load or after reset: rebuild entirely from API data
-        mtrCumState.value = new Map()
-        for (const pt of points.value) {
-          if (pt.hops && pt.timestamp >= mtrStartTime.value!) {
-            mergeHops(pt.hops, pt.extra, pt.timestamp)
-            mtrLastUpdate.value = pt.timestamp
-          }
-        }
-        mtrInitialMergeDone.value = true
-      } else {
-        // Subsequent auto-refresh: just update timestamp (real-time WS handles new data)
-        const lastPoint = points.value[points.value.length - 1]
-        if (lastPoint?.hops) {
-          mtrLastUpdate.value = lastPoint.timestamp
-        }
+      const lastPoint = points.value[points.value.length - 1]
+      if (lastPoint?.hops) {
+        mtrLatestHops.value = lastPoint.hops
+        mtrLastUpdate.value = lastPoint.timestamp
+        if (lastPoint.extra?.mtr_src) mtrSrc.value = lastPoint.extra.mtr_src
+        if (lastPoint.extra?.mtr_dst) mtrDst.value = lastPoint.extra.mtr_dst
       }
     }
     updateChart()
@@ -727,10 +672,12 @@ function handleRealtimeUpdate(data: any) {
   const result = data.result as ProbeResult
   if (!result) return
 
-  // Update MTR hops on every real-time push
+  // MTR: replace display with the latest accumulated snapshot from agent
   if (isMtr.value && result.hops) {
-    mergeHops(result.hops, result.extra, result.timestamp)
+    mtrLatestHops.value = result.hops
     mtrLastUpdate.value = result.timestamp
+    if (result.extra?.mtr_src) mtrSrc.value = result.extra.mtr_src
+    if (result.extra?.mtr_dst) mtrDst.value = result.extra.mtr_dst
   }
 
   if (!isRawRange.value) return
@@ -742,11 +689,10 @@ function handleRealtimeUpdate(data: any) {
 
 function handleMtrReset(data: any) {
   if (data.task_id !== taskId) return
-  mtrCumState.value = new Map()
+  mtrLatestHops.value = []
   mtrSrc.value = ''
   mtrDst.value = ''
   mtrLastUpdate.value = null
-  mtrInitialMergeDone.value = false
   const resetTime = data.reset_time || new Date().toISOString()
   mtrStartTime.value = resetTime
   // Also update taskInfo so subsequent fetchData uses the new reset time
