@@ -14,13 +14,26 @@ class HopState:
     hop: int = 0
     host: str = '???'
     dns_name: str = ''
-    sent: int = 0
-    received: int = 0
+    _resolved: int = 0      # probes whose outcome is known (responded or timed-out)
+    received: int = 0       # probes that got a response
+    _pending: bool = False  # whether there is an in-flight probe awaiting result
     last: float = 0.0       # ms
     best: float = float('inf')
     worst: float = 0.0      # ms
     _mean: float = 0.0
     _m2: float = 0.0
+
+    @property
+    def sent(self) -> int:
+        """Total probes sent, including any in-flight probe (for display)."""
+        return self._resolved + (1 if self._pending else 0)
+
+    @property
+    def loss_pct(self) -> float:
+        """Loss% based on resolved probes only (excludes in-flight)."""
+        if self._resolved == 0:
+            return 0.0
+        return (1.0 - self.received / self._resolved) * 100.0
 
     @property
     def avg(self) -> float:
@@ -154,13 +167,11 @@ class PersistentMtr:
             hops_data = []
             sorted_hops = sorted(self._hops.values(), key=lambda h: h.hop)
             for h in sorted_hops:
-                sent = h.sent
-                loss_pct = (1.0 - h.received / sent) * 100.0 if sent > 0 else 0.0
                 hops_data.append({
                     'hop': h.hop,
                     'host': h.dns_name or h.host,
-                    'loss': round(loss_pct, 1),
-                    'sent': sent,
+                    'loss': round(h.loss_pct, 1),
+                    'sent': h.sent,
                     'last': round(h.last, 2),
                     'avg': round(h.avg, 2),
                     'best': round(h.best, 2) if h.best != float('inf') else 0.0,
@@ -254,7 +265,11 @@ class PersistentMtr:
             if code == 'x':
                 # Probe sent to this hop
                 self._ensure_hop(hop_num)
-                self._hops[hop_num].sent += 1
+                h = self._hops[hop_num]
+                if h._pending:
+                    # Previous probe timed out (no 'p' received before next 'x')
+                    h._resolved += 1
+                h._pending = True
 
             elif code == 'h':
                 ip = parts[2]
@@ -281,7 +296,10 @@ class PersistentMtr:
                 latency_ms = latency_us / 1000.0
 
                 self._ensure_hop(hop_num)
-                self._hops[hop_num].record_latency(latency_ms)
+                h = self._hops[hop_num]
+                h._pending = False
+                h._resolved += 1
+                h.record_latency(latency_ms)
 
     def _ensure_hop(self, hop_num: int):
         if hop_num not in self._hops:
